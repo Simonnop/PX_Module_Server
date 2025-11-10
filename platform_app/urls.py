@@ -8,7 +8,7 @@ urlpatterns = [
     path("module/online", views.show_online_modules),
     path("module/send_message", views.send_message),
     path("workflow/create", views.workflow_create),
-    path("workflow/execute", views.workflow_execute),
+    path("workflow/<int:workflow_id>/execute", views.workflow_execute),
     path("workflow/list", views.list_workflows),
     path("scheduler/jobs", views.list_scheduled_jobs),
     path("scheduler/reload", views.reload_scheduler_jobs),

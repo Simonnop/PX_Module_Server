@@ -220,23 +220,17 @@ def workflow_create(request: HttpRequest):
 
 @require_POST
 @csrf_exempt
-def workflow_execute(request: HttpRequest):
+def workflow_execute(request: HttpRequest, workflow_id: int):
     """执行工作流
 
-    请求参数（JSON）：
-    {
-        "workflow_id": 工作流ID
-    }
+    请求方式：POST /workflow/{workflow_id}/execute
+    
+    路径参数：
+        workflow_id: 工作流ID
     
     返回：{"workflow_id": workflow_id, "workflow_name": workflow_name, "message": "工作流执行已启动"}
     """
     try:
-        data = json.loads(request.body)
-        workflow_id = data.get("workflow_id")
-        
-        if not workflow_id:
-            return response_fail("3002", "workflow_id 参数不能为空!")
-        
         # 验证工作流是否存在
         try:
             workflow = WorkFlow.objects.get(workflow_id=workflow_id)
@@ -252,8 +246,6 @@ def workflow_execute(request: HttpRequest):
             "message": "工作流执行已启动"
         })
     
-    except json.JSONDecodeError:
-        return response_fail("3002", "JSON 格式错误!")
     except Exception as e:
         return response_fail("3001", f"执行工作流失败: {str(e)}")
 
