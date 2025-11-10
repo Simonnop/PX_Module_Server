@@ -13,6 +13,12 @@ from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 
 from .utils import parse_time_tz, parse_time_shift, to_naive_local
+from .email import (
+    send_module_not_found_notification,
+    send_module_name_not_found_notification,
+    send_module_info_invalid_notification,
+    send_module_execution_exception_notification
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +114,16 @@ def execute_workflow(workflow_id):
                         module = WorkModule.objects.get(name=module_name)
                         module_hash = module.module_hash
                     except WorkModule.DoesNotExist:
-                        logger.warning(f"工作流 {workflow.name} 中的模块名称 {module_name} 不存在")
+                        error_msg = f"工作流 {workflow.name} 中的模块名称 {module_name} 不存在"
+                        logger.warning(error_msg)
+                        
+                        # 发送邮件通知
+                        send_module_name_not_found_notification(
+                            workflow_name=workflow.name,
+                            workflow_id=workflow.workflow_id,
+                            module_name=module_name,
+                            failure_time=to_naive_local(now)
+                        )
                         continue
                     except WorkModule.MultipleObjectsReturned:
                         # 如果多个同名模块，取第一个
@@ -121,7 +136,16 @@ def execute_workflow(workflow_id):
                 module_args = {}
             
             if not module_hash:
-                logger.warning(f"工作流 {workflow.name} 中的模块信息无效: {module_info}")
+                error_msg = f"工作流 {workflow.name} 中的模块信息无效: {module_info}"
+                logger.warning(error_msg)
+                
+                # 发送邮件通知
+                send_module_info_invalid_notification(
+                    workflow_name=workflow.name,
+                    workflow_id=workflow.workflow_id,
+                    module_info=str(module_info),
+                    failure_time=to_naive_local(now)
+                )
                 continue
                 
             try:
@@ -145,9 +169,28 @@ def execute_workflow(workflow_id):
                 send_message_to_client(module.module_hash, message)
                 logger.info(f"工作流 {workflow.name} 执行模块 {module.name} ({module_hash})")
             except WorkModule.DoesNotExist:
-                logger.error(f"工作流 {workflow.name} 中的模块 {module_hash} 不存在或已离线")
+                error_msg = f"工作流 {workflow.name} 中的模块 {module_hash} 不存在或已离线"
+                logger.error(error_msg)
+                
+                # 发送邮件通知
+                send_module_not_found_notification(
+                    workflow_name=workflow.name,
+                    workflow_id=workflow.workflow_id,
+                    module_hash=module_hash,
+                    failure_time=to_naive_local(now)
+                )
             except Exception as e:
-                logger.error(f"工作流 {workflow.name} 执行模块 {module_hash} 失败: {str(e)}")
+                error_msg = f"工作流 {workflow.name} 执行模块 {module_hash} 失败: {str(e)}"
+                logger.error(error_msg)
+                
+                # 发送邮件通知
+                send_module_execution_exception_notification(
+                    workflow_name=workflow.name,
+                    workflow_id=workflow.workflow_id,
+                    module_hash=module_hash,
+                    exception_message=str(e),
+                    failure_time=to_naive_local(now)
+                )
             
     except WorkFlow.DoesNotExist:
         logger.error(f"工作流 {workflow_id} 不存在")

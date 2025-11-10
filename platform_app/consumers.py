@@ -2,9 +2,10 @@ import json
 import logging
 from datetime import datetime
 from .utils import local_now
+from .email import send_module_execution_failure_notification
 from channels.generic.websocket import AsyncWebsocketConsumer
 from asgiref.sync import sync_to_async
-from .models import WorkModule
+from .models import WorkModule, WorkFlow
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,9 @@ class ModuleConsumer(AsyncWebsocketConsumer):
                 json_data = json.loads(text_data)
                 logger.info(f"收到模块消息: {json_data}")
                 
+                # 处理模块执行结果
+                await self._handle_module_result(json_data)
+                
                 # 返回处理结果
                 await self.send("receive result")
                 
@@ -127,6 +131,45 @@ class ModuleConsumer(AsyncWebsocketConsumer):
             last_login_time=module.last_login_time, 
             last_alive_time=module.last_alive_time
         )
+    
+    async def _handle_module_result(self, json_data: dict):
+        """处理模块执行结果，如果失败则发送邮件通知"""
+        try:
+            # 检查是否是执行结果消息
+            result_type = json_data.get("type")
+            status = json_data.get("status")
+            
+            # 支持多种格式：type="result" 或直接包含 status 字段
+            if result_type == "result" or "status" in json_data:
+                # 检查执行状态是否为失败
+                if status in ["failure", "failed", "error", "fail"]:
+                    # 获取模块信息
+                    try:
+                        module = await self._get_module_by_session(self.session_id)
+                    except WorkModule.DoesNotExist:
+                        logger.warning("无法找到模块信息，跳过邮件通知")
+                        return
+                    
+                    # 获取工作流信息（支持从 meta 字段或直接字段获取）
+                    meta = json_data.get("meta", {})
+                    workflow_id = json_data.get("workflow_id") or meta.get("workflow_id")
+                    workflow_name = json_data.get("workflow_name") or meta.get("workflow_name") or "未知工作流"
+                    module_name = json_data.get("module_name", module.name)
+                    error_message = json_data.get("error") or json_data.get("message") or json_data.get("error_message") or "执行失败"
+                    
+                    # 发送邮件通知
+                    await sync_to_async(send_module_execution_failure_notification)(
+                        workflow_name=workflow_name,
+                        workflow_id=workflow_id,
+                        module_name=module_name,
+                        module_hash=module.module_hash,
+                        error_message=error_message,
+                        failure_time=local_now()
+                    )
+                    
+                    logger.warning(f"模块 {module_name} 执行失败，已发送邮件通知")
+        except Exception as e:
+            logger.exception(f"处理模块执行结果时发生异常: {str(e)}")
 
 
 

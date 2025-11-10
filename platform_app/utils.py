@@ -1,8 +1,15 @@
 import pytz
+import requests
+import logging
 from django.conf import settings
 from datetime import datetime, timedelta
+from decouple import config
 
+logger = logging.getLogger(__name__)
 trigger_tz = pytz.UTC if settings.USE_TZ else pytz.timezone(settings.TIME_ZONE)
+
+# 邮件服务配置
+EMAIL_API_URL = config("EMAIL_API_URL")
 
 def parse_time_tz(time):
     """
@@ -57,3 +64,34 @@ def to_naive_local(time: datetime) -> datetime:
 def local_now() -> datetime:
     """获取本地朴素时间（naive）。"""
     return datetime.now()
+
+def send_email_notification(to_email: str, subject: str, content: str, content_type: str = "text"):
+    """
+    发送邮件通知
+    
+    Args:
+        to_email: 收件人邮箱
+        subject: 邮件主题
+        content: 邮件内容
+        content_type: 内容类型，默认为 "text"
+    
+    Returns:
+        bool: 发送是否成功
+    """
+    try:
+        data = {
+            "to_email": to_email,
+            "subject": subject,
+            "content": content,
+            "content_type": content_type
+        }
+        
+        response = requests.post(EMAIL_API_URL, json=data, timeout=10)
+        response.raise_for_status()
+        
+        result = response.json()
+        logger.info(f"邮件发送成功: {result}")
+        return True
+    except Exception as e:
+        logger.error(f"邮件发送失败: {str(e)}")
+        return False

@@ -63,6 +63,10 @@ SERVER_PORT=10080
 # MongoDB 配置
 MONGODB_HOST=mongodb://localhost:27017
 MONGODB_NAME=forecast_platform
+
+# 邮件通知配置
+NOTIFICATION_EMAIL=741617293@qq.com
+EMAIL_API_URL=http://your-email-server:port/send
 ```
 
 ### 生产环境配置示例
@@ -77,6 +81,10 @@ ALLOWED_HOSTS=example.com,www.example.com,api.example.com
 MONGODB_HOST=mongodb://localhost:27017
 MONGODB_NAME=forecast_platform
 
+# 邮件通知配置
+NOTIFICATION_EMAIL=your-email@example.com
+EMAIL_API_URL=http://your-email-server:port/send
+
 # 静态文件目录（可选，默认使用项目根目录下的 staticfiles）
 STATIC_ROOT=/path/to/staticfiles
 
@@ -87,7 +95,7 @@ LOG_LEVEL=INFO
 **重要说明**：
 - 生产环境必须设置 `SECRET_KEY` 和 `ALLOWED_HOSTS`
 - `SECRET_KEY` 生成方式：`python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"`
-- 开发环境可以使用默认值，但生产环境必须明确配置
+- 邮件通知配置 `NOTIFICATION_EMAIL` 和 `EMAIL_API_URL` 必须设置，否则应用启动时会报错
 
 ## 数据库初始化
 
