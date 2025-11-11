@@ -4,15 +4,18 @@ import pytz
 from django.utils import timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.combining import OrTrigger
 from django.conf import settings
+from django.db import models
 from django_apscheduler.jobstores import DjangoJobStore
 from django_apscheduler.models import DjangoJobExecution
 from platform_app.models import WorkModule, WorkFlow
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
+from decouple import config
 
-from .utils import parse_time_tz, parse_time_shift, to_naive_local
+from .utils import parse_time_tz, parse_time_shift, to_naive_local, local_now
 from .email import (
     send_module_not_found_notification,
     send_module_name_not_found_notification,
@@ -21,6 +24,9 @@ from .email import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 心跳超时时间配置（秒），默认10秒
+HEARTBEAT_TIMEOUT_SECONDS = config("HEARTBEAT_TIMEOUT_SECONDS", default=10, cast=int)
 
 # 创建调度器
 _trigger_tz = pytz.UTC if settings.USE_TZ else pytz.timezone(settings.TIME_ZONE)
@@ -283,6 +289,41 @@ def cleanup_old_job_executions(max_age=604_800):
     """清理旧的任务执行记录"""
     DjangoJobExecution.objects.delete_old_job_executions(max_age)
 
+def check_module_alive_status():
+    """检查模块存活状态，将超时的模块设置为离线"""
+    try:
+        now = local_now()
+        timeout_threshold = now - timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS)
+        
+        # 查询所有在线但心跳超时的模块
+        expired_modules_query = WorkModule.objects.filter(
+            alive=True
+        ).filter(
+            # last_alive_time 为空或小于超时阈值
+            models.Q(last_alive_time__isnull=True) | models.Q(last_alive_time__lt=timeout_threshold)
+        )
+        
+        # 先获取模块列表用于日志记录
+        expired_modules_list = list(expired_modules_query.values('name', 'module_hash', 'last_alive_time'))
+        expired_count = len(expired_modules_list)
+        
+        if expired_count > 0:
+            # 批量更新为离线状态
+            updated_count = expired_modules_query.update(alive=False, session_id=None)
+            logger.info(f"检测到 {expired_count} 个模块心跳超时，已将 {updated_count} 个模块设置为离线状态")
+            
+            # 记录被设置为离线的模块信息
+            for module_info in expired_modules_list:
+                logger.warning(
+                    f"模块 {module_info['name']} (hash: {module_info['module_hash']}) 心跳超时，"
+                    f"最后存活时间: {module_info['last_alive_time']}"
+                )
+        else:
+            logger.debug("所有在线模块心跳正常")
+            
+    except Exception as e:
+        logger.error(f"检查模块存活状态失败: {str(e)}", exc_info=True)
+
 def reload_workflow_jobs():
     """重新加载所有工作流定时任务"""
     # 获取所有当前工作流的 job_id（包括 enable=False 的，用于清理）
@@ -335,6 +376,16 @@ def initialize_scheduler():
         max_instances=1,
         replace_existing=True,
     )
+    
+    # 添加模块存活状态检查任务（30 秒钟执行一次）
+    scheduler.add_job(
+        check_module_alive_status,
+        trigger=IntervalTrigger(seconds=30, timezone=_trigger_tz),
+        id="check_module_alive_status",
+        max_instances=1,
+        replace_existing=True,
+    )
+    logger.info(f"模块存活状态检查任务已添加，心跳超时时间: {HEARTBEAT_TIMEOUT_SECONDS} 秒")
     
     # 启动调度器
     scheduler.start()
