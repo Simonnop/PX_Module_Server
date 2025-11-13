@@ -6,6 +6,8 @@ from .email import send_module_execution_failure_notification
 from channels.generic.websocket import AsyncWebsocketConsumer
 from asgiref.sync import sync_to_async
 from .models import WorkModule, WorkFlow
+from channels.layers import get_channel_layer
+from asgiref.sync import async_to_sync
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +15,34 @@ logger = logging.getLogger(__name__)
 # - `AsyncWebsocketConsumer` 处理 WS 生命周期：connect/receive/disconnect。
 # - 通过查询参数 `hash` 识别模块，并在连接时绑定会话。
 
+# 跟踪模块执行等待状态：{execution_id: {'module_hash': str, 'workflow_id': str, 'sent_time': datetime}}
+global _execution_waiting 
+_execution_waiting = {}
+
+def send_message_to_client(module_hash, message):
+    """同步方式发送消息到客户端"""
+    channel_layer = get_channel_layer()
+    async_to_sync(channel_layer.group_send)(
+        f"module_{module_hash}",
+        {
+            "type": "send_message", # 反射? 对应触发 consumers.py 中的 send_message 方法
+            "message": message
+        }
+    )
+
+def shutdown_client_module(module_hash):
+    """关闭客户端模块"""
+    message = {"type": "shutdown"}
+    send_message_to_client(module_hash, message)
+
+def clear_execution_waiting(execution_id):
+    """清除执行等待状态"""
+    try:
+        if execution_id in _execution_waiting:
+            _execution_waiting.pop(execution_id)
+            logger.debug(f"已清除执行ID {execution_id} 的等待状态")
+    except Exception as e:
+        logger.warning(f"清除执行等待状态失败 (执行ID: {execution_id}): {str(e)}")
 
 class ModuleConsumer(AsyncWebsocketConsumer):
     async def connect(self):
@@ -83,7 +113,6 @@ class ModuleConsumer(AsyncWebsocketConsumer):
             # 尝试解析JSON数据
             try:
                 json_data = json.loads(text_data)
-                logger.info(f"收到模块消息: {json_data}")
                 
                 # 处理模块执行结果
                 await self._handle_module_result(json_data)
@@ -139,6 +168,15 @@ class ModuleConsumer(AsyncWebsocketConsumer):
             result_type = json_data.get("type")
             status = json_data.get("status")
             
+            # 获取执行ID（如果存在）
+            meta = json_data.get("meta", {})
+            execution_id = json_data.get("execution_id") or meta.get("execution_id")
+            
+            # 如果收到执行结果，清除超时等待状态
+            if execution_id:
+                await sync_to_async(clear_execution_waiting)(execution_id)
+                logger.info(f"收到合法回复信息: {json_data}")
+            
             # 支持多种格式：type="result" 或直接包含 status 字段
             if result_type == "result" or "status" in json_data:
                 # 检查执行状态是否为失败
@@ -151,7 +189,6 @@ class ModuleConsumer(AsyncWebsocketConsumer):
                         return
                     
                     # 获取工作流信息（支持从 meta 字段或直接字段获取）
-                    meta = json_data.get("meta", {})
                     workflow_id = json_data.get("workflow_id") or meta.get("workflow_id")
                     workflow_name = json_data.get("workflow_name") or meta.get("workflow_name") or "未知工作流"
                     module_name = json_data.get("module_name", module.name)

@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime, timedelta
 import pytz
+import uuid
 from django.utils import timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -11,8 +12,7 @@ from django.db import models
 from django_apscheduler.jobstores import DjangoJobStore
 from django_apscheduler.models import DjangoJobExecution
 from platform_app.models import WorkModule, WorkFlow
-from channels.layers import get_channel_layer
-from asgiref.sync import async_to_sync
+from platform_app.consumers import send_message_to_client, _execution_waiting
 from decouple import config
 
 from .utils import parse_time_tz, parse_time_shift, to_naive_local, local_now
@@ -28,21 +28,13 @@ logger = logging.getLogger(__name__)
 # 心跳超时时间配置（秒），默认10秒
 HEARTBEAT_TIMEOUT_SECONDS = config("HEARTBEAT_TIMEOUT_SECONDS", default=10, cast=int)
 
+# 执行指令等待超时时间配置（秒），默认60秒（1分钟）
+EXECUTION_TIMEOUT_SECONDS = config("EXECUTION_TIMEOUT_SECONDS", default=60, cast=int)
+
 # 创建调度器
 _trigger_tz = pytz.UTC if settings.USE_TZ else pytz.timezone(settings.TIME_ZONE)
 scheduler = BackgroundScheduler(timezone=_trigger_tz)
 scheduler.add_jobstore(DjangoJobStore(), "default")
-
-def send_message_to_client(module_hash, message):
-    """同步方式发送消息到客户端"""
-    channel_layer = get_channel_layer()
-    async_to_sync(channel_layer.group_send)(
-        f"module_{module_hash}",
-        {
-            "type": "send_message",
-            "message": message
-        }
-    )
 
 def get_next_execution_time(cron_list, shift_time, shift_unit):
     """
@@ -161,11 +153,14 @@ def execute_workflow(workflow_id):
                 module.last_execution_time = to_naive_local(now)
                 module.save()
                 
+                # 生成执行ID用于跟踪
+                execution_id = str(uuid.uuid4())
+                
                 # 发送执行命令到客户端
                 message = {
                     "type": "execute",
                     "meta": {
-                        # "module_hash": module.module_hash,
+                        "execution_id": execution_id,  # 添加执行ID用于跟踪
                         "execution_time": to_naive_local(now).isoformat(),
                         "workflow_id": str(workflow.id),
                         "workflow_name": workflow.name
@@ -173,7 +168,17 @@ def execute_workflow(workflow_id):
                     "args": module_args  # 传递模块参数
                 }
                 send_message_to_client(module.module_hash, message)
-                logger.info(f"工作流 {workflow.name} 执行模块 {module.name} ({module_hash})")
+                
+                # 记录执行等待状态
+                _execution_waiting[execution_id] = {
+                    'module_hash': module_hash,
+                    'workflow_id': str(workflow.workflow_id),
+                    'workflow_name': workflow.name,
+                    'module_name': module.name,
+                    'sent_time': to_naive_local(now)
+                }
+                
+                logger.info(f"工作流 {workflow.name} 执行模块 {module.name} ({module_hash})，执行ID: {execution_id}")
             except WorkModule.DoesNotExist:
                 error_msg = f"工作流 {workflow.name} 中的模块 {module_hash} 不存在或已离线"
                 logger.error(error_msg)
@@ -289,6 +294,59 @@ def cleanup_old_job_executions(max_age=604_800):
     """清理旧的任务执行记录"""
     DjangoJobExecution.objects.delete_old_job_executions(max_age)
 
+def check_execution_timeout():
+    """检查所有等待中的执行指令是否超时，如果超时则使模块离线"""
+    try:
+        now = local_now()
+        timeout_threshold = now - timedelta(seconds=EXECUTION_TIMEOUT_SECONDS)
+        
+        # 遍历所有等待中的执行指令
+        expired_executions = []
+        for execution_id, execution_info in list(_execution_waiting.items()):
+            sent_time = execution_info['sent_time']
+            
+            # 检查是否超时（sent_time 早于超时阈值）
+            if sent_time < timeout_threshold:
+                expired_executions.append((execution_id, execution_info))
+        
+        if expired_executions:
+            logger.info(f"检测到 {len(expired_executions)} 个执行指令超时")
+            
+            # 处理每个超时的执行指令
+            for execution_id, execution_info in expired_executions:
+                module_hash = execution_info['module_hash']
+                workflow_name = execution_info['workflow_name']
+                module_name = execution_info['module_name']
+                sent_time = execution_info['sent_time']
+                
+                elapsed_seconds = (now - sent_time).total_seconds()
+                
+                # 使模块离线
+                try:
+                    module = WorkModule.objects.get(module_hash=module_hash)
+                    if module.alive:
+                        module.alive = False
+                        module.session_id = None
+                        module.save()
+                        
+                        logger.warning(
+                            f"模块 {module_name} (hash: {module_hash}) 执行指令超时 "
+                            f"(工作流: {workflow_name}, 执行ID: {execution_id}, "
+                            f"等待时间: {elapsed_seconds:.1f}秒)，已设置为离线"
+                        )
+                except WorkModule.DoesNotExist:
+                    logger.warning(f"模块 {module_hash} 不存在，无法设置为离线")
+                except Exception as e:
+                    logger.error(f"设置模块 {module_hash} 离线失败: {str(e)}", exc_info=True)
+                
+                # 移除等待状态
+                _execution_waiting.pop(execution_id, None)
+        else:
+            logger.debug(f"所有执行指令正常，当前等待中的执行指令数量: {len(_execution_waiting)}")
+            
+    except Exception as e:
+        logger.error(f"检查执行超时失败: {str(e)}", exc_info=True)
+
 def check_module_alive_status():
     """检查模块存活状态，将超时的模块设置为离线"""
     try:
@@ -386,6 +444,16 @@ def initialize_scheduler():
         replace_existing=True,
     )
     logger.info(f"模块存活状态检查任务已添加，心跳超时时间: {HEARTBEAT_TIMEOUT_SECONDS} 秒")
+    
+    # 添加执行指令超时检查任务（30 秒钟执行一次）
+    scheduler.add_job(
+        check_execution_timeout,
+        trigger=IntervalTrigger(seconds=30, timezone=_trigger_tz),
+        id="check_execution_timeout",
+        max_instances=1,
+        replace_existing=True,
+    )
+    logger.info(f"执行指令超时检查任务已添加，超时时间: {EXECUTION_TIMEOUT_SECONDS} 秒")
     
     # 启动调度器
     scheduler.start()
