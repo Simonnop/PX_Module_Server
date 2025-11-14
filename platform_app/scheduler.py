@@ -128,7 +128,7 @@ def execute_workflow(workflow_id):
                         # 如果多个同名模块，取第一个
                         module = WorkModule.objects.filter(name=module_name).first()
                         module_hash = module.module_hash
-                        logger.warning(f"工作流 {workflow.name} 中存在多个名为 {module_name} 的模块，使用第一个 (hash: {module_hash})")
+                        logger.warning(f"工作流 {workflow.name} 中存在多个名为 {module_name} 的模块，使用第一个 模块 {module.name}(id: {module.module_id})")
             else:
                 # 字符串格式，直接作为 module_hash
                 module_hash = module_info
@@ -168,41 +168,66 @@ def execute_workflow(workflow_id):
                     },
                     "args": module_args  # 传递模块参数
                 }
-                send_message_to_client(module.module_hash, message)
+                send_message_to_client(module.module_id, message)
                 
                 # 记录执行等待状态
                 _execution_waiting[execution_id] = {
-                    'module_hash': module_hash,
+                    'module_id': module.module_id,
                     'workflow_id': str(workflow.workflow_id),
                     'workflow_name': workflow.name,
                     'module_name': module.name,
                     'sent_time': to_naive_local(now)
                 }
                 
-                logger.info(f"工作流 {workflow.name} 执行模块 {module.name} ({module_hash})，执行ID: {execution_id}")
+                logger.info(f"工作流 {workflow.name} 执行模块 {module.name}(id: {module.module_id})，执行ID: {execution_id}")
             except WorkModule.DoesNotExist:
                 error_msg = f"工作流 {workflow.name} 中的模块 {module_hash} 不存在或已离线"
                 logger.error(error_msg)
                 
-                # 发送邮件通知
-                send_module_not_found_notification(
-                    workflow_name=workflow.name,
-                    workflow_id=workflow.workflow_id,
-                    module_hash=module_hash,
-                    failure_time=to_naive_local(now)
-                )
+                # 发送邮件通知（使用 module_hash 查找模块信息）
+                try:
+                    module = WorkModule.objects.get(module_hash=module_hash)
+                    send_module_not_found_notification(
+                        workflow_name=workflow.name,
+                        workflow_id=workflow.workflow_id,
+                        module_id=module.module_id,
+                        module_name=module.name,
+                        failure_time=to_naive_local(now)
+                    )
+                except WorkModule.DoesNotExist:
+                    # 如果找不到模块，使用 hash 作为标识
+                    send_module_not_found_notification(
+                        workflow_name=workflow.name,
+                        workflow_id=workflow.workflow_id,
+                        module_id=None,
+                        module_name=None,
+                        failure_time=to_naive_local(now)
+                    )
             except Exception as e:
                 error_msg = f"工作流 {workflow.name} 执行模块 {module_hash} 失败: {str(e)}"
                 logger.error(error_msg)
                 
-                # 发送邮件通知
-                send_module_execution_exception_notification(
-                    workflow_name=workflow.name,
-                    workflow_id=workflow.workflow_id,
-                    module_hash=module_hash,
-                    exception_message=str(e),
-                    failure_time=to_naive_local(now)
-                )
+                # 发送邮件通知（使用 module_hash 查找模块信息）
+                try:
+                    module = WorkModule.objects.get(module_hash=module_hash)
+                    send_module_execution_exception_notification(
+                        workflow_name=workflow.name,
+                        workflow_id=workflow.workflow_id,
+                        module_id=module.module_id,
+                        module_name=module.name,
+                        exception_message=str(e),
+                        failure_time=to_naive_local(now)
+                    )
+                except WorkModule.DoesNotExist:
+                    # 如果找不到模块，使用 hash 作为标识
+                    send_module_execution_exception_notification(
+                        workflow_name=workflow.name,
+                        workflow_id=workflow.workflow_id,
+                        module_id=None,
+                        module_name=None,
+                        exception_message=str(e),
+                        failure_time=to_naive_local(now)
+                    )
             
     except WorkFlow.DoesNotExist:
         logger.error(f"工作流 {workflow_id} 不存在")
@@ -315,7 +340,7 @@ def check_execution_timeout():
             
             # 处理每个超时的执行指令
             for execution_id, execution_info in expired_executions:
-                module_hash = execution_info['module_hash']
+                module_id = execution_info['module_id']
                 workflow_id = execution_info['workflow_id']
                 workflow_name = execution_info['workflow_name']
                 module_name = execution_info['module_name']
@@ -329,7 +354,7 @@ def check_execution_timeout():
                         workflow_name=workflow_name,
                         workflow_id=workflow_id,
                         module_name=module_name,
-                        module_hash=module_hash,
+                        module_id=module_id,
                         execution_id=execution_id,
                         elapsed_seconds=elapsed_seconds,
                         timeout_seconds=EXECUTION_TIMEOUT_SECONDS,
@@ -337,7 +362,7 @@ def check_execution_timeout():
                     )
                     
                     logger.warning(
-                        f"模块 {module_name} (hash: {module_hash}) 执行指令超时 "
+                        f"模块 {module_name}(id: {module_id}) 执行指令超时 "
                         f"(工作流: {workflow_name}, 执行ID: {execution_id}, "
                         f"等待时间: {elapsed_seconds:.1f}秒)，已发送邮件通知"
                     )
@@ -367,7 +392,7 @@ def check_module_alive_status():
         )
         
         # 先获取模块列表用于日志记录
-        expired_modules_list = list(expired_modules_query.values('name', 'module_hash', 'last_alive_time'))
+        expired_modules_list = list(expired_modules_query.values('module_id', 'name', 'last_alive_time'))
         expired_count = len(expired_modules_list)
         
         if expired_count > 0:
@@ -378,7 +403,7 @@ def check_module_alive_status():
             # 记录被设置为离线的模块信息
             for module_info in expired_modules_list:
                 logger.warning(
-                    f"模块 {module_info['name']} (hash: {module_info['module_hash']}) 心跳超时，"
+                    f"模块 {module_info['name']}(id: {module_info['module_id']}) 心跳超时，"
                     f"最后存活时间: {module_info['last_alive_time']}"
                 )
         else:

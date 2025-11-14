@@ -15,26 +15,26 @@ logger = logging.getLogger(__name__)
 # - `AsyncWebsocketConsumer` 处理 WS 生命周期：connect/receive/disconnect。
 # - 通过查询参数 `hash` 识别模块，并在连接时绑定会话。
 
-# 跟踪模块执行等待状态：{execution_id: {'module_hash': str, 'workflow_id': str, 'sent_time': datetime}}
+# 跟踪模块执行等待状态：{execution_id: {'module_id': int, 'workflow_id': str, 'sent_time': datetime}}
 global _execution_waiting 
 _execution_waiting = {}
 
-def send_message_to_client(module_hash, message):
+def send_message_to_client(module_id, message):
     """同步方式发送消息到客户端"""
     channel_layer = get_channel_layer()
     async_to_sync(channel_layer.group_send)(
-        f"module_{module_hash}",
+        f"module_{module_id}",
         {
             "type": "send_message", # 反射? 对应触发 consumers.py 中的 send_message 方法
             "message": message
         }
     )
 
-def close_module_websocket(module_hash):
+def close_module_websocket(module_id):
     """服务端关闭指定模块的 WebSocket 连接
     
     Args:
-        module_hash: 模块的哈希值
+        module_id: 模块ID
     
     Returns:
         bool: 是否成功发送关闭连接消息
@@ -46,15 +46,27 @@ def close_module_websocket(module_hash):
             return False
         
         async_to_sync(channel_layer.group_send)(
-            f"module_{module_hash}",
+            f"module_{module_id}",
             {
                 "type": "close_connection"  # 触发 close_connection 方法
             }
         )
-        logger.info(f"已发送关闭 WebSocket 连接消息到模块 {module_hash}")
+        # 获取模块信息用于日志
+        from .models import WorkModule
+        try:
+            module = WorkModule.objects.get(module_id=module_id)
+            logger.info(f"已发送关闭 WebSocket 连接消息到模块 {module.name}(id: {module_id})")
+        except WorkModule.DoesNotExist:
+            logger.info(f"已发送关闭 WebSocket 连接消息到模块 (id: {module_id})")
         return True
     except Exception as e:
-        logger.error(f"关闭模块 {module_hash} 的 WebSocket 连接失败: {str(e)}", exc_info=True)
+        # 获取模块信息用于日志
+        from .models import WorkModule
+        try:
+            module = WorkModule.objects.get(module_id=module_id)
+            logger.error(f"关闭模块 {module.name}(id: {module_id}) 的 WebSocket 连接失败: {str(e)}", exc_info=True)
+        except WorkModule.DoesNotExist:
+            logger.error(f"关闭模块 (id: {module_id}) 的 WebSocket 连接失败: {str(e)}", exc_info=True)
         return False
 
 def clear_execution_waiting(execution_id):
@@ -92,9 +104,9 @@ class ModuleConsumer(AsyncWebsocketConsumer):
         await self._bind_session(module)
         await self.accept()
         
-        logger.info(f"模块 {module.module_hash} 连接成功")
+        logger.info(f"模块 {module.name}(id: {module.module_id}) 连接成功")
         await self.channel_layer.group_add(
-                f"module_{module.module_hash}",
+                f"module_{module.module_id}",
                 self.channel_name
             )
 
@@ -108,13 +120,13 @@ class ModuleConsumer(AsyncWebsocketConsumer):
         module.session_id = None
         module.alive = False
         # 更新模块 - 使用 sync_to_async 包装同步操作
-        await sync_to_async(WorkModule.objects.filter(module_hash=module.module_hash).update)(
+        await sync_to_async(WorkModule.objects.filter(module_id=module.module_id).update)(
             session_id=module.session_id, 
             alive=module.alive
         )
-        logger.info(f"模块 {module.module_hash} 断开连接")
+        logger.info(f"模块 {module.name}(id: {module.module_id}) 断开连接")
         await self.channel_layer.group_discard(
-                f"module_{module.module_hash}",
+                f"module_{module.module_id}",
                 self.channel_name
             )
 
@@ -127,7 +139,7 @@ class ModuleConsumer(AsyncWebsocketConsumer):
                 return
             module.last_alive_time = local_now()
             # 更新模块 - 使用 sync_to_async 包装同步操作
-            await sync_to_async(WorkModule.objects.filter(module_hash=module.module_hash).update)(
+            await sync_to_async(WorkModule.objects.filter(module_id=module.module_id).update)(
                 last_alive_time=module.last_alive_time
             )
             await self.send("heartbeat confirm")
@@ -174,11 +186,11 @@ class ModuleConsumer(AsyncWebsocketConsumer):
                 module = await self._get_module_by_session(self.session_id)
                 module.session_id = None
                 module.alive = False
-                await sync_to_async(WorkModule.objects.filter(module_hash=module.module_hash).update)(
+                await sync_to_async(WorkModule.objects.filter(module_id=module.module_id).update)(
                     session_id=module.session_id, 
                     alive=module.alive
                 )
-                logger.info(f"服务端主动断开模块 {module.module_hash} 的 WebSocket 连接")
+                logger.info(f"服务端主动断开模块 {module.name}(id: {module.module_id}) 的 WebSocket 连接")
             except WorkModule.DoesNotExist:
                 logger.warning("无法找到模块信息，直接关闭连接")
             
@@ -187,7 +199,7 @@ class ModuleConsumer(AsyncWebsocketConsumer):
                 try:
                     module = await self._get_module_by_session(self.session_id)
                     await self.channel_layer.group_discard(
-                        f"module_{module.module_hash}",
+                        f"module_{module.module_id}",
                         self.channel_name
                     )
                 except WorkModule.DoesNotExist:
@@ -213,7 +225,7 @@ class ModuleConsumer(AsyncWebsocketConsumer):
         module.last_login_time = now
         module.last_alive_time = now
         # 更新模块 - 使用 sync_to_async 包装同步操作
-        await sync_to_async(WorkModule.objects.filter(module_hash=module.module_hash).update)(
+        await sync_to_async(WorkModule.objects.filter(module_id=module.module_id).update)(
             session_id=module.session_id, 
             alive=module.alive, 
             last_login_time=module.last_login_time, 
@@ -258,12 +270,12 @@ class ModuleConsumer(AsyncWebsocketConsumer):
                         workflow_name=workflow_name,
                         workflow_id=workflow_id,
                         module_name=module_name,
-                        module_hash=module.module_hash,
+                        module_id=module.module_id,
                         error_message=error_message,
                         failure_time=local_now()
                     )
                     
-                    logger.warning(f"模块 {module_name} 执行失败，已发送邮件通知")
+                    logger.warning(f"模块 {module_name}(id: {module.module_id}) 执行失败，已发送邮件通知")
         except Exception as e:
             logger.exception(f"处理模块执行结果时发生异常: {str(e)}")
 

@@ -16,7 +16,7 @@ def format_module_execution_failure_email(
     workflow_name: str,
     workflow_id: Optional[str],
     module_name: str,
-    module_hash: str,
+    module_id: Optional[int],
     error_message: str,
     failure_time: datetime
 ) -> tuple[str, str]:
@@ -27,7 +27,7 @@ def format_module_execution_failure_email(
         workflow_name: 工作流名称
         workflow_id: 工作流ID
         module_name: 模块名称
-        module_hash: 模块Hash
+        module_id: 模块ID
         error_message: 错误信息
         failure_time: 失败时间
     
@@ -36,12 +36,13 @@ def format_module_execution_failure_email(
     """
     subject = f"【工作流执行失败】{workflow_name} - {module_name}"
     
+    module_info = f"{module_name}(id: {module_id})" if module_id and module_name else (module_name or f"(id: {module_id})" if module_id else "未知")
+    
     content = f"""工作流模块执行失败通知
 
 工作流名称: {workflow_name}
 工作流ID: {workflow_id or "未知"}
-模块名称: {module_name}
-模块Hash: {module_hash}
+模块信息: {module_info}
 失败时间: {failure_time.strftime('%Y-%m-%d %H:%M:%S')}
 错误信息: {error_message}
 
@@ -53,7 +54,8 @@ def format_module_execution_failure_email(
 def format_module_not_found_email(
     workflow_name: str,
     workflow_id: Optional[int],
-    module_hash: str,
+    module_id: Optional[int],
+    module_name: Optional[str],
     failure_time: datetime
 ) -> tuple[str, str]:
     """
@@ -62,7 +64,8 @@ def format_module_not_found_email(
     Args:
         workflow_name: 工作流名称
         workflow_id: 工作流ID
-        module_hash: 模块Hash
+        module_id: 模块ID
+        module_name: 模块名称
         failure_time: 失败时间
     
     Returns:
@@ -70,11 +73,13 @@ def format_module_not_found_email(
     """
     subject = f"【工作流执行失败】{workflow_name} - 模块不存在或已离线"
     
+    module_info = f"{module_name}(id: {module_id})" if module_id and module_name else (module_name or f"(id: {module_id})" if module_id else "未知")
+    
     content = f"""工作流模块执行失败通知
 
 工作流名称: {workflow_name}
 工作流ID: {workflow_id or "未知"}
-模块Hash: {module_hash}
+模块信息: {module_info}
 失败时间: {failure_time.strftime('%Y-%m-%d %H:%M:%S')}
 错误信息: 模块不存在或已离线
 
@@ -152,7 +157,8 @@ def format_module_info_invalid_email(
 def format_module_execution_exception_email(
     workflow_name: str,
     workflow_id: Optional[int],
-    module_hash: str,
+    module_id: Optional[int],
+    module_name: Optional[str],
     exception_message: str,
     failure_time: datetime
 ) -> tuple[str, str]:
@@ -162,7 +168,8 @@ def format_module_execution_exception_email(
     Args:
         workflow_name: 工作流名称
         workflow_id: 工作流ID
-        module_hash: 模块Hash
+        module_id: 模块ID
+        module_name: 模块名称
         exception_message: 异常信息
         failure_time: 失败时间
     
@@ -171,11 +178,13 @@ def format_module_execution_exception_email(
     """
     subject = f"【工作流执行失败】{workflow_name} - 模块执行异常"
     
+    module_info = f"{module_name}(id: {module_id})" if module_id and module_name else (module_name or f"(id: {module_id})" if module_id else "未知")
+    
     content = f"""工作流模块执行失败通知
 
 工作流名称: {workflow_name}
 工作流ID: {workflow_id or "未知"}
-模块Hash: {module_hash}
+模块信息: {module_info}
 失败时间: {failure_time.strftime('%Y-%m-%d %H:%M:%S')}
 错误信息: {exception_message}
 
@@ -188,7 +197,7 @@ def send_module_execution_failure_notification(
     workflow_name: str,
     workflow_id: Optional[str],
     module_name: str,
-    module_hash: str,
+    module_id: Optional[int],
     error_message: str,
     failure_time: datetime,
     to_email: Optional[str] = None
@@ -200,7 +209,7 @@ def send_module_execution_failure_notification(
         workflow_name: 工作流名称
         workflow_id: 工作流ID
         module_name: 模块名称
-        module_hash: 模块Hash
+        module_id: 模块ID
         error_message: 错误信息
         failure_time: 失败时间
         to_email: 收件人邮箱，默认使用配置的邮箱
@@ -212,7 +221,7 @@ def send_module_execution_failure_notification(
         workflow_name=workflow_name,
         workflow_id=workflow_id,
         module_name=module_name,
-        module_hash=module_hash,
+        module_id=module_id,
         error_message=error_message,
         failure_time=failure_time
     )
@@ -226,7 +235,8 @@ def send_module_execution_failure_notification(
 def send_module_not_found_notification(
     workflow_name: str,
     workflow_id: Optional[int],
-    module_hash: str,
+    module_id: Optional[int],
+    module_name: Optional[str],
     failure_time: datetime,
     to_email: Optional[str] = None
 ) -> bool:
@@ -236,7 +246,8 @@ def send_module_not_found_notification(
     Args:
         workflow_name: 工作流名称
         workflow_id: 工作流ID
-        module_hash: 模块Hash
+        module_id: 模块ID
+        module_name: 模块名称
         failure_time: 失败时间
         to_email: 收件人邮箱，默认使用配置的邮箱
     
@@ -246,7 +257,8 @@ def send_module_not_found_notification(
     subject, content = format_module_not_found_email(
         workflow_name=workflow_name,
         workflow_id=workflow_id,
-        module_hash=module_hash,
+        module_id=module_id,
+        module_name=module_name,
         failure_time=failure_time
     )
     return send_email_notification(
@@ -325,7 +337,8 @@ def send_module_info_invalid_notification(
 def send_module_execution_exception_notification(
     workflow_name: str,
     workflow_id: Optional[int],
-    module_hash: str,
+    module_id: Optional[int],
+    module_name: Optional[str],
     exception_message: str,
     failure_time: datetime,
     to_email: Optional[str] = None
@@ -336,7 +349,8 @@ def send_module_execution_exception_notification(
     Args:
         workflow_name: 工作流名称
         workflow_id: 工作流ID
-        module_hash: 模块Hash
+        module_id: 模块ID
+        module_name: 模块名称
         exception_message: 异常信息
         failure_time: 失败时间
         to_email: 收件人邮箱，默认使用配置的邮箱
@@ -347,7 +361,8 @@ def send_module_execution_exception_notification(
     subject, content = format_module_execution_exception_email(
         workflow_name=workflow_name,
         workflow_id=workflow_id,
-        module_hash=module_hash,
+        module_id=module_id,
+        module_name=module_name,
         exception_message=exception_message,
         failure_time=failure_time
     )
@@ -362,7 +377,7 @@ def format_module_execution_timeout_email(
     workflow_name: str,
     workflow_id: Optional[str],
     module_name: str,
-    module_hash: str,
+    module_id: Optional[int],
     execution_id: str,
     elapsed_seconds: float,
     timeout_seconds: int,
@@ -375,7 +390,7 @@ def format_module_execution_timeout_email(
         workflow_name: 工作流名称
         workflow_id: 工作流ID
         module_name: 模块名称
-        module_hash: 模块Hash
+        module_id: 模块ID
         execution_id: 执行ID
         elapsed_seconds: 已等待时间（秒）
         timeout_seconds: 超时时间（秒）
@@ -386,12 +401,13 @@ def format_module_execution_timeout_email(
     """
     subject = f"【工作流执行超时】{workflow_name} - {module_name}"
     
+    module_info = f"{module_name}(id: {module_id})" if module_id and module_name else (module_name or f"(id: {module_id})" if module_id else "未知")
+    
     content = f"""工作流模块执行超时通知
 
 工作流名称: {workflow_name}
 工作流ID: {workflow_id or "未知"}
-模块名称: {module_name}
-模块Hash: {module_hash}
+模块信息: {module_info}
 执行ID: {execution_id}
 超时时间: {timeout_seconds} 秒
 已等待时间: {elapsed_seconds:.1f} 秒
@@ -407,7 +423,7 @@ def send_module_execution_timeout_notification(
     workflow_name: str,
     workflow_id: Optional[str],
     module_name: str,
-    module_hash: str,
+    module_id: Optional[int],
     execution_id: str,
     elapsed_seconds: float,
     timeout_seconds: int,
@@ -421,7 +437,7 @@ def send_module_execution_timeout_notification(
         workflow_name: 工作流名称
         workflow_id: 工作流ID
         module_name: 模块名称
-        module_hash: 模块Hash
+        module_id: 模块ID
         execution_id: 执行ID
         elapsed_seconds: 已等待时间（秒）
         timeout_seconds: 超时时间（秒）
@@ -435,7 +451,7 @@ def send_module_execution_timeout_notification(
         workflow_name=workflow_name,
         workflow_id=workflow_id,
         module_name=module_name,
-        module_hash=module_hash,
+        module_id=module_id,
         execution_id=execution_id,
         elapsed_seconds=elapsed_seconds,
         timeout_seconds=timeout_seconds,
