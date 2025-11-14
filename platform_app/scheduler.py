@@ -20,13 +20,14 @@ from .email import (
     send_module_not_found_notification,
     send_module_name_not_found_notification,
     send_module_info_invalid_notification,
-    send_module_execution_exception_notification
+    send_module_execution_exception_notification,
+    send_module_execution_timeout_notification
 )
 
 logger = logging.getLogger(__name__)
 
-# 心跳超时时间配置（秒），默认10秒
-HEARTBEAT_TIMEOUT_SECONDS = config("HEARTBEAT_TIMEOUT_SECONDS", default=10, cast=int)
+# 心跳超时时间配置（秒），默认60秒（1分钟）
+HEARTBEAT_TIMEOUT_SECONDS = config("HEARTBEAT_TIMEOUT_SECONDS", default=60, cast=int)
 
 # 执行指令等待超时时间配置（秒），默认60秒（1分钟）
 EXECUTION_TIMEOUT_SECONDS = config("EXECUTION_TIMEOUT_SECONDS", default=60, cast=int)
@@ -295,7 +296,7 @@ def cleanup_old_job_executions(max_age=604_800):
     DjangoJobExecution.objects.delete_old_job_executions(max_age)
 
 def check_execution_timeout():
-    """检查所有等待中的执行指令是否超时，如果超时则使模块离线"""
+    """检查所有等待中的执行指令是否超时，如果超时则发送邮件通知"""
     try:
         now = local_now()
         timeout_threshold = now - timedelta(seconds=EXECUTION_TIMEOUT_SECONDS)
@@ -315,29 +316,33 @@ def check_execution_timeout():
             # 处理每个超时的执行指令
             for execution_id, execution_info in expired_executions:
                 module_hash = execution_info['module_hash']
+                workflow_id = execution_info['workflow_id']
                 workflow_name = execution_info['workflow_name']
                 module_name = execution_info['module_name']
                 sent_time = execution_info['sent_time']
                 
                 elapsed_seconds = (now - sent_time).total_seconds()
                 
-                # 使模块离线
+                # 发送邮件通知
                 try:
-                    module = WorkModule.objects.get(module_hash=module_hash)
-                    if module.alive:
-                        module.alive = False
-                        module.session_id = None
-                        module.save()
-                        
-                        logger.warning(
-                            f"模块 {module_name} (hash: {module_hash}) 执行指令超时 "
-                            f"(工作流: {workflow_name}, 执行ID: {execution_id}, "
-                            f"等待时间: {elapsed_seconds:.1f}秒)，已设置为离线"
-                        )
-                except WorkModule.DoesNotExist:
-                    logger.warning(f"模块 {module_hash} 不存在，无法设置为离线")
+                    send_module_execution_timeout_notification(
+                        workflow_name=workflow_name,
+                        workflow_id=workflow_id,
+                        module_name=module_name,
+                        module_hash=module_hash,
+                        execution_id=execution_id,
+                        elapsed_seconds=elapsed_seconds,
+                        timeout_seconds=EXECUTION_TIMEOUT_SECONDS,
+                        failure_time=to_naive_local(now)
+                    )
+                    
+                    logger.warning(
+                        f"模块 {module_name} (hash: {module_hash}) 执行指令超时 "
+                        f"(工作流: {workflow_name}, 执行ID: {execution_id}, "
+                        f"等待时间: {elapsed_seconds:.1f}秒)，已发送邮件通知"
+                    )
                 except Exception as e:
-                    logger.error(f"设置模块 {module_hash} 离线失败: {str(e)}", exc_info=True)
+                    logger.error(f"发送超时邮件通知失败 (执行ID: {execution_id}): {str(e)}", exc_info=True)
                 
                 # 移除等待状态
                 _execution_waiting.pop(execution_id, None)

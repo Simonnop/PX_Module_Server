@@ -7,6 +7,7 @@ from .models import WorkModule, DataRequirement, WorkFlow
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 from .scheduler import execute_workflow, scheduler, reload_workflow_jobs
+from .consumers import close_module_websocket
 
 # 说明（类比 Spring MVC）：
 # - 这些函数可类比为 `@RestController` 下的 `@GetMapping`。
@@ -126,6 +127,50 @@ def send_message(request: HttpRequest):
     )
 
     return response_ok({"message": message})
+
+
+@require_POST
+@csrf_exempt
+def close_module_websocket_api(request: HttpRequest):
+    """关闭指定模块的 WebSocket 连接
+
+    请求参数：module_id（模块ID）
+    """
+    module_id = request.POST.get("module_id")
+    
+    if not module_id:
+        return response_fail("3002", "module_id 参数不能为空")
+    
+    try:
+        module_id = int(module_id)
+    except ValueError:
+        return response_fail("3002", "module_id 必须是整数")
+    
+    try:
+        # 根据 module_id 查找模块
+        module = WorkModule.objects.get(module_id=module_id)
+        
+        # 检查模块是否在线
+        if not module.alive:
+            return response_fail("3003", f"模块 {module.name} (ID: {module_id}) 当前不在线")
+        
+        # 关闭 WebSocket 连接
+        success = close_module_websocket(module.module_hash)
+        
+        if success:
+            return response_ok({
+                "module_id": module.module_id,
+                "module_hash": module.module_hash,
+                "module_name": module.name,
+                "message": f"已成功关闭模块 {module.name} 的 WebSocket 连接"
+            })
+        else:
+            return response_fail("3004", f"关闭模块 {module.name} 的 WebSocket 连接失败")
+            
+    except WorkModule.DoesNotExist:
+        return response_fail("3003", f"模块 ID {module_id} 不存在")
+    except Exception as e:
+        return response_fail("3001", f"关闭 WebSocket 连接时发生异常: {str(e)}")
 
 
 @require_POST

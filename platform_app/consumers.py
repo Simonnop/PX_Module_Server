@@ -30,10 +30,32 @@ def send_message_to_client(module_hash, message):
         }
     )
 
-def shutdown_client_module(module_hash):
-    """关闭客户端模块"""
-    message = {"type": "shutdown"}
-    send_message_to_client(module_hash, message)
+def close_module_websocket(module_hash):
+    """服务端关闭指定模块的 WebSocket 连接
+    
+    Args:
+        module_hash: 模块的哈希值
+    
+    Returns:
+        bool: 是否成功发送关闭连接消息
+    """
+    try:
+        channel_layer = get_channel_layer()
+        if channel_layer is None:
+            logger.error("Channel Layer 未配置，无法关闭 WebSocket 连接")
+            return False
+        
+        async_to_sync(channel_layer.group_send)(
+            f"module_{module_hash}",
+            {
+                "type": "close_connection"  # 触发 close_connection 方法
+            }
+        )
+        logger.info(f"已发送关闭 WebSocket 连接消息到模块 {module_hash}")
+        return True
+    except Exception as e:
+        logger.error(f"关闭模块 {module_hash} 的 WebSocket 连接失败: {str(e)}", exc_info=True)
+        return False
 
 def clear_execution_waiting(execution_id):
     """清除执行等待状态"""
@@ -139,6 +161,43 @@ class ModuleConsumer(AsyncWebsocketConsumer):
         await self.send(text_data=json.dumps({
             'message': message
         }))
+    
+    async def close_connection(self, event=None):
+        """服务端主动关闭 WebSocket 连接
+        
+        Args:
+            event: Channels 事件对象（可选）
+        """
+        try:
+            # 更新模块状态为离线
+            try:
+                module = await self._get_module_by_session(self.session_id)
+                module.session_id = None
+                module.alive = False
+                await sync_to_async(WorkModule.objects.filter(module_hash=module.module_hash).update)(
+                    session_id=module.session_id, 
+                    alive=module.alive
+                )
+                logger.info(f"服务端主动断开模块 {module.module_hash} 的 WebSocket 连接")
+            except WorkModule.DoesNotExist:
+                logger.warning("无法找到模块信息，直接关闭连接")
+            
+            # 从 group 中移除
+            if hasattr(self, 'session_id'):
+                try:
+                    module = await self._get_module_by_session(self.session_id)
+                    await self.channel_layer.group_discard(
+                        f"module_{module.module_hash}",
+                        self.channel_name
+                    )
+                except WorkModule.DoesNotExist:
+                    pass
+            
+            # 主动关闭连接
+            await self.close()
+        except Exception as e:
+            logger.error(f"关闭连接时发生异常: {str(e)}", exc_info=True)
+            await self.close()
 
     async def _get_module(self, module_hash: str) -> WorkModule:
         return await WorkModule.objects.aget(module_hash=module_hash)

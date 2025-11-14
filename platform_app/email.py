@@ -357,3 +357,93 @@ def send_module_execution_exception_notification(
         content=content
     )
 
+
+def format_module_execution_timeout_email(
+    workflow_name: str,
+    workflow_id: Optional[str],
+    module_name: str,
+    module_hash: str,
+    execution_id: str,
+    elapsed_seconds: float,
+    timeout_seconds: int,
+    failure_time: datetime
+) -> tuple[str, str]:
+    """
+    生成模块执行超时的邮件主题和内容
+    
+    Args:
+        workflow_name: 工作流名称
+        workflow_id: 工作流ID
+        module_name: 模块名称
+        module_hash: 模块Hash
+        execution_id: 执行ID
+        elapsed_seconds: 已等待时间（秒）
+        timeout_seconds: 超时时间（秒）
+        failure_time: 超时时间
+    
+    Returns:
+        tuple: (邮件主题, 邮件内容)
+    """
+    subject = f"【工作流执行超时】{workflow_name} - {module_name}"
+    
+    content = f"""工作流模块执行超时通知
+
+工作流名称: {workflow_name}
+工作流ID: {workflow_id or "未知"}
+模块名称: {module_name}
+模块Hash: {module_hash}
+执行ID: {execution_id}
+超时时间: {timeout_seconds} 秒
+已等待时间: {elapsed_seconds:.1f} 秒
+超时时间: {failure_time.strftime('%Y-%m-%d %H:%M:%S')}
+错误信息: 模块执行指令超时，未在规定时间内返回结果
+
+请检查模块是否正常运行或网络连接是否正常。
+"""
+    return subject, content.strip()
+
+
+def send_module_execution_timeout_notification(
+    workflow_name: str,
+    workflow_id: Optional[str],
+    module_name: str,
+    module_hash: str,
+    execution_id: str,
+    elapsed_seconds: float,
+    timeout_seconds: int,
+    failure_time: datetime,
+    to_email: Optional[str] = None
+) -> bool:
+    """
+    发送模块执行超时的邮件通知
+    
+    Args:
+        workflow_name: 工作流名称
+        workflow_id: 工作流ID
+        module_name: 模块名称
+        module_hash: 模块Hash
+        execution_id: 执行ID
+        elapsed_seconds: 已等待时间（秒）
+        timeout_seconds: 超时时间（秒）
+        failure_time: 超时时间
+        to_email: 收件人邮箱，默认使用配置的邮箱
+    
+    Returns:
+        bool: 发送是否成功
+    """
+    subject, content = format_module_execution_timeout_email(
+        workflow_name=workflow_name,
+        workflow_id=workflow_id,
+        module_name=module_name,
+        module_hash=module_hash,
+        execution_id=execution_id,
+        elapsed_seconds=elapsed_seconds,
+        timeout_seconds=timeout_seconds,
+        failure_time=failure_time
+    )
+    return send_email_notification(
+        to_email=to_email or DEFAULT_NOTIFICATION_EMAIL,
+        subject=subject,
+        content=content
+    )
+

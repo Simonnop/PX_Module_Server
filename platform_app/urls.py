@@ -7,6 +7,7 @@ urlpatterns = [
     path("module/register", views.module_register),
     path("module/online", views.show_online_modules),
     path("module/send_message", views.send_message),
+    path("module/close_websocket", views.close_module_websocket_api),
     path("workflow/create", views.workflow_create),
     path("workflow/<int:workflow_id>/execute", views.workflow_execute),
     path("workflow/list", views.list_workflows),
