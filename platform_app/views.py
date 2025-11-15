@@ -428,3 +428,95 @@ def reload_scheduler_jobs(request: HttpRequest):
     except Exception as e:
         return response_fail("3001", f"重新加载调度器任务失败: {str(e)}")
 
+
+@require_GET
+def list_channel_groups(request: HttpRequest):
+    """列出 channel layer 中所有的 group 及其连接
+    
+    返回：group 列表，包含 group 名称、连接的 channel 列表，以及关联的模块信息（如果适用）
+    """
+    try:
+        channel_layer = get_channel_layer()
+        
+        if channel_layer is None:
+            return response_fail("3002", "Channel Layer 未配置")
+        
+        # 检查是否是 InMemoryChannelLayer
+        from channels.layers import InMemoryChannelLayer
+        if not isinstance(channel_layer, InMemoryChannelLayer):
+            return response_fail("3002", f"当前 Channel Layer 类型 ({type(channel_layer).__name__}) 不支持查询 group 信息")
+        
+        # 获取所有 group 信息
+        groups_info = []
+        
+        # 获取所有在线模块，用于关联 group 信息
+        online_modules = {}
+        for module in WorkModule.objects.filter(alive=True):
+            online_modules[module.module_id] = {
+                "module_id": module.module_id,
+                "name": module.name,
+                "session_id": module.session_id,
+                "last_alive_time": module.last_alive_time.isoformat() if module.last_alive_time else None,
+                "last_login_time": module.last_login_time.isoformat() if module.last_login_time else None,
+            }
+        
+        # 访问 InMemoryChannelLayer 的 groups 属性
+        # groups 是一个字典：{group_name: set of channel_names}
+        # 使用 getattr 安全访问，以防属性不存在
+        groups_dict = getattr(channel_layer, 'groups', None)
+        if groups_dict is None:
+            return response_fail("3002", "无法访问 Channel Layer 的 groups 属性")
+        
+        for group_name, channel_set in groups_dict.items():
+            # channel_set 可能是 set 或其他可迭代对象
+            try:
+                channel_list = list(channel_set) if channel_set else []
+            except (TypeError, AttributeError):
+                channel_list = []
+            
+            group_info = {
+                "group_name": group_name,
+                "channel_count": len(channel_list),
+                "channels": channel_list,
+            }
+            
+            # 如果是 module_{module_id} 格式的 group，尝试关联模块信息
+            if group_name.startswith("module_"):
+                try:
+                    module_id_str = group_name.replace("module_", "")
+                    module_id = int(module_id_str)
+                    if module_id in online_modules:
+                        group_info["module"] = online_modules[module_id]
+                    else:
+                        # 模块不在线，但 group 可能还存在（延迟清理）
+                        # 尝试从数据库查询模块信息
+                        try:
+                            module = WorkModule.objects.get(module_id=module_id)
+                            group_info["module"] = {
+                                "module_id": module.module_id,
+                                "name": module.name,
+                                "session_id": module.session_id,
+                                "alive": module.alive,
+                                "last_alive_time": module.last_alive_time.isoformat() if module.last_alive_time else None,
+                                "last_login_time": module.last_login_time.isoformat() if module.last_login_time else None,
+                            }
+                        except WorkModule.DoesNotExist:
+                            group_info["module"] = None
+                            group_info["module_id"] = module_id
+                            group_info["module_not_found"] = True
+                except ValueError:
+                    # group 名称格式不正确
+                    group_info["module"] = None
+            else:
+                group_info["module"] = None
+            
+            groups_info.append(group_info)
+        
+        return response_ok({
+            "total_groups": len(groups_info),
+            "groups": groups_info
+        })
+    
+    except Exception as e:
+        return response_fail("3001", f"获取 channel groups 信息失败: {str(e)}")
+
