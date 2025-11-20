@@ -94,7 +94,8 @@ def module_register(request: HttpRequest):
 def show_online_modules(request: HttpRequest):
     """查询在线模块列表
 
-    由 WebSocket 连接状态驱动 `alive/session_id/last_*` 字段更新。
+    由 WebSocket 连接状态驱动 `alive/session_id/last_login_time` 字段更新。
+    连接监控使用 WebSocket ping/pong 机制，不再使用 heartbeat 消息。
     """
     online = WorkModule.objects.filter(alive=True).values(
         "module_id", "name", "description", "priority", "module_hash", "last_execution_time",

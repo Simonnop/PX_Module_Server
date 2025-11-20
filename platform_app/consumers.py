@@ -131,41 +131,38 @@ class ModuleConsumer(AsyncWebsocketConsumer):
             )
 
     async def receive(self, text_data=None, bytes_data=None):
-        """接收消息：处理心跳或JSON请求"""
-        if text_data == "heartbeat":
-            try:
-                module = await self._get_module_by_session(self.session_id)
-            except WorkModule.DoesNotExist:
-                return
-            module.last_alive_time = local_now()
-            # 更新模块 - 使用 sync_to_async 包装同步操作
-            await sync_to_async(WorkModule.objects.filter(module_id=module.module_id).update)(
-                last_alive_time=module.last_alive_time
-            )
-            await self.send("heartbeat confirm")
-        else:
-            # 尝试解析JSON数据
-            try:
-                json_data = json.loads(text_data)
-                
-                # 处理模块执行结果
-                await self._handle_module_result(json_data)
-                
-                # 返回处理结果
-                await self.send("receive result")
-                
-            except json.JSONDecodeError:
-                logger.error("JSON解析失败")
-                await self.send(json.dumps({
-                    'status': 'error',
-                    'message': 'JSON格式错误'
-                }))
-            except Exception as e:
-                logger.exception(f"处理请求时发生异常: {str(e)}")
-                await self.send(json.dumps({
-                    'status': 'error',
-                    'message': f'处理请求时发生异常: {str(e)}'
-                }))
+        """接收消息：处理JSON请求或WebSocket ping/pong"""
+        # 每次收到消息时更新 last_alive_time（表示连接活跃）
+        # WebSocket ping/pong 帧也会触发此方法，但 text_data 和 bytes_data 可能为 None
+        await self._update_alive_time()
+        
+        # WebSocket ping/pong 由底层自动处理，这里只处理业务消息
+        if text_data is None:
+            # 可能是 ping 帧，由 WebSocket 协议自动处理
+            return
+        
+        # 尝试解析JSON数据
+        try:
+            json_data = json.loads(text_data)
+            
+            # 处理模块执行结果
+            await self._handle_module_result(json_data)
+            
+            # 返回处理结果
+            await self.send("receive result")
+            
+        except json.JSONDecodeError:
+            logger.error("JSON解析失败")
+            await self.send(json.dumps({
+                'status': 'error',
+                'message': 'JSON格式错误'
+            }))
+        except Exception as e:
+            logger.exception(f"处理请求时发生异常: {str(e)}")
+            await self.send(json.dumps({
+                'status': 'error',
+                'message': f'处理请求时发生异常: {str(e)}'
+            }))
 
     async def send_message(self, event):
         message = event['message']
@@ -217,6 +214,21 @@ class ModuleConsumer(AsyncWebsocketConsumer):
     async def _get_module_by_session(self, session_id: str) -> WorkModule:
         return await WorkModule.objects.aget(session_id=session_id)
 
+    async def _update_alive_time(self):
+        """更新模块的 last_alive_time（在收到 ping/pong 或任何消息时调用）"""
+        try:
+            module = await self._get_module_by_session(self.session_id)
+            now = local_now()
+            # 更新 last_alive_time - 使用 sync_to_async 包装同步操作
+            await sync_to_async(WorkModule.objects.filter(module_id=module.module_id).update)(
+                last_alive_time=now
+            )
+        except WorkModule.DoesNotExist:
+            # 模块不存在，忽略
+            pass
+        except Exception as e:
+            logger.warning(f"更新模块存活时间失败: {str(e)}")
+    
     async def _bind_session(self, module: WorkModule):
         """绑定 WebSocket 会话到模块并记录时间戳"""
         module.session_id = self.session_id
@@ -228,7 +240,7 @@ class ModuleConsumer(AsyncWebsocketConsumer):
         await sync_to_async(WorkModule.objects.filter(module_id=module.module_id).update)(
             session_id=module.session_id, 
             alive=module.alive, 
-            last_login_time=module.last_login_time, 
+            last_login_time=module.last_login_time,
             last_alive_time=module.last_alive_time
         )
     

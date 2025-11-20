@@ -269,9 +269,7 @@ chmod +x manage.sh
 ## WebSocket 协议
 
 - 连接地址：`ws://<host>:<port>/websocket?hash=<module_hash>`
-- 心跳：
-  - 客户端发送：`heartbeat`
-  - 服务端响应：`heartbeat confirm`
+- 连接监控：使用 WebSocket 协议自带的 ping/pong 机制进行连接监控，无需客户端发送心跳消息
 - 执行命令（服务端 → 客户端）：
   - 服务端发送（JSON）：
     ```json

@@ -26,11 +26,12 @@ from .email import (
 
 logger = logging.getLogger(__name__)
 
-# 心跳超时时间配置（秒），默认60秒（1分钟）
-HEARTBEAT_TIMEOUT_SECONDS = config("HEARTBEAT_TIMEOUT_SECONDS", default=60, cast=int)
+# WebSocket 连接超时时间配置（秒），默认120秒（2分钟）
+# 如果 last_alive_time 超过此时间未更新，则认为连接已断开
+WEBSOCKET_TIMEOUT_SECONDS = config("WEBSOCKET_TIMEOUT_SECONDS", default=120, cast=int)
 
-# 执行指令等待超时时间配置（秒），默认60秒（1分钟）
-EXECUTION_TIMEOUT_SECONDS = config("EXECUTION_TIMEOUT_SECONDS", default=60, cast=int)
+# 执行指令等待超时时间配置（秒），默认120秒（2分钟）
+EXECUTION_TIMEOUT_SECONDS = config("EXECUTION_TIMEOUT_SECONDS", default=120, cast=int)
 
 # 创建调度器
 _trigger_tz = pytz.UTC if settings.USE_TZ else pytz.timezone(settings.TIME_ZONE)
@@ -378,36 +379,63 @@ def check_execution_timeout():
         logger.error(f"检查执行超时失败: {str(e)}", exc_info=True)
 
 def check_module_alive_status():
-    """检查模块存活状态，将超时的模块设置为离线"""
+    """检查模块存活状态，基于 WebSocket 连接状态和 last_alive_time 进行监控"""
     try:
+        from channels.layers import get_channel_layer, InMemoryChannelLayer
+        
         now = local_now()
-        timeout_threshold = now - timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS)
+        timeout_threshold = now - timedelta(seconds=WEBSOCKET_TIMEOUT_SECONDS)
         
-        # 查询所有在线但心跳超时的模块
-        expired_modules_query = WorkModule.objects.filter(
-            alive=True
-        ).filter(
-            # last_alive_time 为空或小于超时阈值
-            models.Q(last_alive_time__isnull=True) | models.Q(last_alive_time__lt=timeout_threshold)
-        )
+        channel_layer = get_channel_layer()
+        groups_dict = None
         
-        # 先获取模块列表用于日志记录
-        expired_modules_list = list(expired_modules_query.values('module_id', 'name', 'last_alive_time'))
-        expired_count = len(expired_modules_list)
+        # 尝试获取 channel layer 的 groups 信息（仅适用于 InMemoryChannelLayer）
+        if channel_layer is not None:
+            if isinstance(channel_layer, InMemoryChannelLayer):
+                groups_dict = getattr(channel_layer, 'groups', None)
         
-        if expired_count > 0:
-            # 批量更新为离线状态
-            updated_count = expired_modules_query.update(alive=False, session_id=None)
-            logger.info(f"检测到 {expired_count} 个模块心跳超时，已将 {updated_count} 个模块设置为离线状态")
+        # 获取所有在线模块
+        online_modules = WorkModule.objects.filter(alive=True)
+        expired_modules = []
+        
+        # 检查每个在线模块的存活状态
+        for module in online_modules:
+            is_expired = False
+            reason = ""
             
-            # 记录被设置为离线的模块信息
-            for module_info in expired_modules_list:
+            # 方法1：检查 WebSocket 连接状态（如果可用）
+            if groups_dict is not None:
+                group_name = f"module_{module.module_id}"
+                try:
+                    channel_set = groups_dict.get(group_name)
+                    if not channel_set or len(channel_set) == 0:
+                        is_expired = True
+                        reason = "WebSocket 连接已断开（channel layer 中无活跃连接）"
+                except Exception as e:
+                    logger.debug(f"检查模块 {module.name}(id: {module.module_id}) channel layer 状态失败: {str(e)}")
+            
+            # 方法2：检查 last_alive_time 超时（备用检查）
+            if not is_expired:
+                if module.last_alive_time is None or module.last_alive_time < timeout_threshold:
+                    is_expired = True
+                    reason = f"last_alive_time 超时（最后活跃时间: {module.last_alive_time}，超时阈值: {timeout_threshold}）"
+            
+            if is_expired:
+                expired_modules.append(module)
                 logger.warning(
-                    f"模块 {module_info['name']}(id: {module_info['module_id']}) 心跳超时，"
-                    f"最后存活时间: {module_info['last_alive_time']}"
+                    f"模块 {module.name}(id: {module.module_id}) 连接已断开，原因: {reason}"
                 )
+        
+        # 批量更新为离线状态
+        if expired_modules:
+            module_ids = [m.module_id for m in expired_modules]
+            updated_count = WorkModule.objects.filter(module_id__in=module_ids).update(
+                alive=False, 
+                session_id=None
+            )
+            logger.info(f"检测到 {len(expired_modules)} 个模块连接已断开，已将 {updated_count} 个模块设置为离线状态")
         else:
-            logger.debug("所有在线模块心跳正常")
+            logger.debug("所有在线模块的连接正常")
             
     except Exception as e:
         logger.error(f"检查模块存活状态失败: {str(e)}", exc_info=True)
@@ -466,6 +494,8 @@ def initialize_scheduler():
     )
     
     # 添加模块存活状态检查任务（30 秒钟执行一次）
+    # 基于 WebSocket 连接状态和 last_alive_time 进行监控
+    # WebSocket ping/pong 会触发 receive 方法并更新 last_alive_time
     scheduler.add_job(
         check_module_alive_status,
         trigger=IntervalTrigger(seconds=30, timezone=_trigger_tz),
@@ -473,7 +503,7 @@ def initialize_scheduler():
         max_instances=1,
         replace_existing=True,
     )
-    logger.info(f"模块存活状态检查任务已添加，心跳超时时间: {HEARTBEAT_TIMEOUT_SECONDS} 秒")
+    logger.info(f"模块存活状态检查任务已添加，WebSocket 超时时间: {WEBSOCKET_TIMEOUT_SECONDS} 秒")
     
     # 添加执行指令超时检查任务（30 秒钟执行一次）
     scheduler.add_job(
