@@ -137,8 +137,14 @@ class ModuleConsumer(AsyncWebsocketConsumer):
         await self._update_alive_time()
         
         # WebSocket ping/pong 由底层自动处理，这里只处理业务消息
-        if text_data is None:
-            # 可能是 ping 帧，由 WebSocket 协议自动处理
+        if text_data is None or text_data.strip() == "":
+            # 可能是 ping 帧或空消息，由 WebSocket 协议自动处理
+            return
+        
+        # 检查是否是已知的非 JSON 消息（如 ping/pong 相关的文本消息）
+        text_data_stripped = text_data.strip()
+        if text_data_stripped.lower() in ['ping', 'pong']:
+            # 静默处理 ping/pong 文本消息，不记录错误
             return
         
         # 尝试解析JSON数据
@@ -152,10 +158,11 @@ class ModuleConsumer(AsyncWebsocketConsumer):
             await self.send("receive result")
             
         except json.JSONDecodeError:
-            logger.error("JSON解析失败")
+            # JSON 解析失败，记录警告而不是错误（可能是客户端发送了非预期的消息格式）
+            logger.warning(f"收到非 JSON 格式的消息: {text_data[:100] if len(text_data) > 100 else text_data}")
             await self.send(json.dumps({
                 'status': 'error',
-                'message': 'JSON格式错误'
+                'message': 'JSON格式错误，请发送有效的 JSON 格式消息'
             }))
         except Exception as e:
             logger.exception(f"处理请求时发生异常: {str(e)}")
