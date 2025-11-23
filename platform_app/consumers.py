@@ -1,5 +1,6 @@
 import json
 import logging
+import asyncio
 from datetime import datetime
 from .utils import local_now
 from .email import send_module_execution_failure_notification
@@ -8,12 +9,17 @@ from asgiref.sync import sync_to_async
 from .models import WorkModule, WorkFlow
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
+from decouple import config
 
 logger = logging.getLogger(__name__)
 
 # 说明（类比 Spring WebSocket/STOMP）：
 # - `AsyncWebsocketConsumer` 处理 WS 生命周期：connect/receive/disconnect。
 # - 通过查询参数 `hash` 识别模块，并在连接时绑定会话。
+
+# WebSocket ping 发送间隔配置（秒），默认30秒
+# 建议设置为超时时间的 1/3 到 1/2，确保在超时前能检测到连接断开
+WEBSOCKET_PING_INTERVAL_SECONDS = config("WEBSOCKET_PING_INTERVAL_SECONDS", default=30, cast=int)
 
 # 跟踪模块执行等待状态：{execution_id: {'module_id': int, 'workflow_id': str, 'sent_time': datetime}}
 global _execution_waiting 
@@ -79,6 +85,11 @@ def clear_execution_waiting(execution_id):
         logger.warning(f"清除执行等待状态失败 (执行ID: {execution_id}): {str(e)}")
 
 class ModuleConsumer(AsyncWebsocketConsumer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.ping_task = None  # ping 任务句柄
+        self._ping_stop_event = None  # 用于停止 ping 任务的事件
+    
     async def connect(self):
         """建立连接：验证 module_hash 并绑定 session"""
         module_hash = self.scope["query_string"].decode().split("hash=")[-1] if self.scope.get("query_string") else ""
@@ -105,13 +116,27 @@ class ModuleConsumer(AsyncWebsocketConsumer):
         await self.accept()
         
         logger.info(f"模块 {module.name}(id: {module.module_id}) 连接成功")
+        # 尝试删除原有的 channel_name
+        try:
+            await self.channel_layer.group_discard(
+                f"module_{module.module_id}",
+                self.channel_name
+            )
+        except Exception as e:
+            logger.warning(f"删除原有的 channel_name 失败: {str(e)}")
         await self.channel_layer.group_add(
                 f"module_{module.module_id}",
                 self.channel_name
             )
+        
+        # 启动 ping 任务
+        self._start_ping_task()
 
     async def disconnect(self, close_code):
         """断开连接：清理在线状态与会话"""
+        # 停止 ping 任务
+        self._stop_ping_task()
+        
         try:
             module = await self._get_module_by_session(self.session_id)
         except WorkModule.DoesNotExist:
@@ -132,24 +157,18 @@ class ModuleConsumer(AsyncWebsocketConsumer):
 
     async def receive(self, text_data=None, bytes_data=None):
         """接收消息：处理JSON请求或WebSocket ping/pong"""
-        # 每次收到消息时更新 last_alive_time（表示连接活跃）
-        # WebSocket ping/pong 帧也会触发此方法，但 text_data 和 bytes_data 可能为 None
+
         await self._update_alive_time()
-        
-        # WebSocket ping/pong 由底层自动处理，这里只处理业务消息
-        if text_data is None or text_data.strip() == "":
-            # 可能是 ping 帧或空消息，由 WebSocket 协议自动处理
-            return
-        
-        # 检查是否是已知的非 JSON 消息（如 ping/pong 相关的文本消息）
-        text_data_stripped = text_data.strip()
-        if text_data_stripped.lower() in ['ping', 'pong']:
-            # 静默处理 ping/pong 文本消息，不记录错误
-            return
         
         # 尝试解析JSON数据
         try:
             json_data = json.loads(text_data)
+            
+            # 处理 JSON 格式的 pong 消息
+            if json_data.get("type") == "pong":
+                # 客户端回复 pong，更新存活时间（已在 _update_alive_time 中更新）
+                logger.debug("收到客户端 pong 回复")
+                return
             
             # 处理模块执行结果
             await self._handle_module_result(json_data)
@@ -184,6 +203,9 @@ class ModuleConsumer(AsyncWebsocketConsumer):
         Args:
             event: Channels 事件对象（可选）
         """
+        # 停止 ping 任务
+        self._stop_ping_task()
+        
         try:
             # 更新模块状态为离线
             try:
@@ -250,6 +272,70 @@ class ModuleConsumer(AsyncWebsocketConsumer):
             last_login_time=module.last_login_time,
             last_alive_time=module.last_alive_time
         )
+    
+    def _start_ping_task(self):
+        """启动 ping 任务，定期向客户端发送 ping"""
+        if self.ping_task is not None:
+            logger.warning("Ping 任务已存在，跳过启动")
+            return
+        
+        self._ping_stop_event = asyncio.Event()
+        self.ping_task = asyncio.create_task(self._ping_loop())
+        logger.debug(f"已启动 ping 任务，间隔: {WEBSOCKET_PING_INTERVAL_SECONDS} 秒")
+    
+    def _stop_ping_task(self):
+        """停止 ping 任务"""
+        if self.ping_task is not None:
+            if self._ping_stop_event:
+                self._ping_stop_event.set()
+            self.ping_task.cancel()
+            self.ping_task = None
+            self._ping_stop_event = None
+            logger.debug("已停止 ping 任务")
+    
+    async def _ping_loop(self):
+        """Ping 循环任务，定期发送 ping 消息"""
+        try:
+            while True:
+                # 等待指定的间隔时间，或者直到收到停止信号
+                try:
+                    await asyncio.wait_for(
+                        self._ping_stop_event.wait(),
+                        timeout=WEBSOCKET_PING_INTERVAL_SECONDS
+                    )
+                    # 如果事件被设置，说明需要停止
+                    break
+                except asyncio.TimeoutError:
+                    # 超时表示需要发送 ping
+                    pass
+                
+                # 发送 ping
+                try:
+                    await self._send_ping()
+                except Exception as e:
+                    logger.warning(f"发送 ping 失败: {str(e)}")
+                    # 如果发送失败，可能连接已断开，退出循环
+                    break
+        except asyncio.CancelledError:
+            # 任务被取消，正常退出
+            logger.debug("Ping 任务被取消")
+        except Exception as e:
+            logger.error(f"Ping 任务异常: {str(e)}", exc_info=True)
+    
+    async def _send_ping(self):
+        """发送 WebSocket ping 帧
+        """
+        try:
+            # 客户端收到后应该回复 pong 消息
+            await self.send(text_data=json.dumps({
+                "type": "ping",
+                "timestamp": datetime.now().isoformat()
+            }))
+            logger.debug("已发送 ping 消息")
+        except Exception as e:
+            # 如果发送失败，可能连接已断开
+            logger.warning(f"发送 ping 时发生异常: {str(e)}")
+            raise
     
     async def _handle_module_result(self, json_data: dict):
         """处理模块执行结果，如果失败则发送邮件通知"""

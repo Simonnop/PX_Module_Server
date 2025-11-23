@@ -14,6 +14,8 @@ from django_apscheduler.models import DjangoJobExecution
 from platform_app.models import WorkModule, WorkFlow
 from platform_app.consumers import send_message_to_client, _execution_waiting
 from decouple import config
+from channels.layers import get_channel_layer
+from asgiref.sync import async_to_sync
 
 from .utils import parse_time_tz, parse_time_shift, to_naive_local, local_now
 from .email import (
@@ -378,67 +380,127 @@ def check_execution_timeout():
     except Exception as e:
         logger.error(f"检查执行超时失败: {str(e)}", exc_info=True)
 
-def check_module_alive_status():
-    """检查模块存活状态，基于 WebSocket 连接状态和 last_alive_time 进行监控"""
+
+def _cleanup_channel_group(module_id):
+    """清理指定模块的 channel group
+    
+    注意：由于不知道具体的 channel_name，这里尝试清理整个 group。
+    对于 InMemoryChannelLayer，可以尝试直接清理；对于其他类型，group 会在没有活跃连接时自动清理。
+    
+    Args:
+        module_id: 模块ID
+    """
     try:
-        from channels.layers import get_channel_layer, InMemoryChannelLayer
+        channel_layer = get_channel_layer()
+        if channel_layer is None:
+            return False
         
+        group_name = f"module_{module_id}"
+        
+        # 尝试清理 group（如果 channel_layer 支持）
+        # 对于 InMemoryChannelLayer，可以尝试直接访问并清理
+        try:
+            from channels.layers import InMemoryChannelLayer
+            if isinstance(channel_layer, InMemoryChannelLayer):
+                # 直接访问 groups 并清理
+                groups = getattr(channel_layer, 'groups', None)
+                if groups and group_name in groups:
+                    # 清空 group 中的所有 channel
+                    groups[group_name].clear()
+                    logger.debug(f"已清理 channel group: {group_name}")
+                    return True
+        except Exception as e:
+            logger.debug(f"清理 channel group {group_name} 失败（可能不支持直接操作）: {str(e)}")
+        
+        # 对于其他类型的 channel_layer，group 会在没有活跃连接时自动清理
+        # 或者可以通过发送一个清理消息（但僵尸连接已断开，不会收到）
+        return False
+        
+    except Exception as e:
+        logger.warning(f"清理 channel group 时发生异常: {str(e)}")
+        return False
+
+
+def check_and_cleanup_zombie_connections():
+    """检查并清理僵尸 WebSocket 连接
+    
+    僵尸连接定义：last_alive_time 超过 WEBSOCKET_TIMEOUT_SECONDS 未更新的在线连接
+    """
+    try:
         now = local_now()
         timeout_threshold = now - timedelta(seconds=WEBSOCKET_TIMEOUT_SECONDS)
         
-        channel_layer = get_channel_layer()
-        groups_dict = None
+        # 查询所有在线但可能超时的模块
+        # 注意：last_alive_time 可能为 None，需要特殊处理
+        zombie_modules = WorkModule.objects.filter(
+            alive=True
+        ).filter(
+            models.Q(last_alive_time__lt=timeout_threshold) | 
+            models.Q(last_alive_time__isnull=True)
+        )
         
-        # 尝试获取 channel layer 的 groups 信息（仅适用于 InMemoryChannelLayer）
-        if channel_layer is not None:
-            if isinstance(channel_layer, InMemoryChannelLayer):
-                groups_dict = getattr(channel_layer, 'groups', None)
+        zombie_count = zombie_modules.count()
         
-        # 获取所有在线模块
-        online_modules = WorkModule.objects.filter(alive=True)
-        expired_modules = []
-        
-        # 检查每个在线模块的存活状态
-        for module in online_modules:
-            is_expired = False
-            reason = ""
+        if zombie_count > 0:
+            logger.warning(f"检测到 {zombie_count} 个僵尸 WebSocket 连接，开始清理")
             
-            # 方法1：检查 WebSocket 连接状态（如果可用）
-            if groups_dict is not None:
-                group_name = f"module_{module.module_id}"
+            cleaned_count = 0
+            for module in zombie_modules:
                 try:
-                    channel_set = groups_dict.get(group_name)
-                    if not channel_set or len(channel_set) == 0:
-                        is_expired = True
-                        reason = "WebSocket 连接已断开（channel layer 中无活跃连接）"
+                    # 计算超时时间
+                    if module.last_alive_time:
+                        elapsed_seconds = (now - module.last_alive_time).total_seconds()
+                    else:
+                        elapsed_seconds = None
+                    
+                    elapsed_str = f"{elapsed_seconds:.1f}秒" if elapsed_seconds is not None else "未知"
+                    old_session_id = module.session_id
+                    
+                    logger.info(
+                        f"清理僵尸连接: 模块 {module.name}(id: {module.module_id}), "
+                        f"最后活跃时间: {module.last_alive_time}, "
+                        f"超时时间: {elapsed_str}, "
+                        f"会话ID: {old_session_id}"
+                    )
+                    
+                    # 清理 channel group
+                    _cleanup_channel_group(module.module_id)
+                    
+                    # 更新数据库状态
+                    # 注意：不调用 close_module_websocket，因为僵尸连接已经断开，
+                    # 通过 group_send 发送消息无法关闭已断开的连接
+                    module.session_id = None
+                    module.alive = False
+                    module.save()
+                    
+                    cleaned_count += 1
+                    
+                    logger.info(
+                        f"已清理僵尸连接: 模块 {module.name}(id: {module.module_id}), "
+                        f"已更新数据库状态为离线并清理 channel group"
+                    )
+                    
                 except Exception as e:
-                    logger.debug(f"检查模块 {module.name}(id: {module.module_id}) channel layer 状态失败: {str(e)}")
+                    logger.error(
+                        f"清理僵尸连接失败: 模块 {module.name}(id: {module.module_id}), "
+                        f"错误: {str(e)}", 
+                        exc_info=True
+                    )
+                    # 即使出错也尝试更新状态
+                    try:
+                        module.session_id = None
+                        module.alive = False
+                        module.save()
+                    except Exception as save_error:
+                        logger.error(f"更新模块状态失败: {str(save_error)}", exc_info=True)
             
-            # 方法2：检查 last_alive_time 超时（备用检查）
-            if not is_expired:
-                if module.last_alive_time is None or module.last_alive_time < timeout_threshold:
-                    is_expired = True
-                    reason = f"last_alive_time 超时（最后活跃时间: {module.last_alive_time}，超时阈值: {timeout_threshold}）"
-            
-            if is_expired:
-                expired_modules.append(module)
-                logger.warning(
-                    f"模块 {module.name}(id: {module.module_id}) 连接已断开，原因: {reason}"
-                )
-        
-        # 批量更新为离线状态
-        if expired_modules:
-            module_ids = [m.module_id for m in expired_modules]
-            updated_count = WorkModule.objects.filter(module_id__in=module_ids).update(
-                alive=False, 
-                session_id=None
-            )
-            logger.info(f"检测到 {len(expired_modules)} 个模块连接已断开，已将 {updated_count} 个模块设置为离线状态")
+            logger.info(f"僵尸连接清理完成，共清理 {cleaned_count}/{zombie_count} 个连接")
         else:
-            logger.debug("所有在线模块的连接正常")
+            logger.debug(f"未发现僵尸连接，当前在线模块数量: {WorkModule.objects.filter(alive=True).count()}")
             
     except Exception as e:
-        logger.error(f"检查模块存活状态失败: {str(e)}", exc_info=True)
+        logger.error(f"检查并清理僵尸连接失败: {str(e)}", exc_info=True)
+
 
 def reload_workflow_jobs():
     """重新加载所有工作流定时任务"""
@@ -493,18 +555,6 @@ def initialize_scheduler():
         replace_existing=True,
     )
     
-    # 添加模块存活状态检查任务（30 秒钟执行一次）
-    # 基于 WebSocket 连接状态和 last_alive_time 进行监控
-    # WebSocket ping/pong 会触发 receive 方法并更新 last_alive_time
-    scheduler.add_job(
-        check_module_alive_status,
-        trigger=IntervalTrigger(seconds=30, timezone=_trigger_tz),
-        id="check_module_alive_status",
-        max_instances=1,
-        replace_existing=True,
-    )
-    logger.info(f"模块存活状态检查任务已添加，WebSocket 超时时间: {WEBSOCKET_TIMEOUT_SECONDS} 秒")
-    
     # 添加执行指令超时检查任务（30 秒钟执行一次）
     scheduler.add_job(
         check_execution_timeout,
@@ -514,6 +564,21 @@ def initialize_scheduler():
         replace_existing=True,
     )
     logger.info(f"执行指令超时检查任务已添加，超时时间: {EXECUTION_TIMEOUT_SECONDS} 秒")
+    
+    # 添加 WebSocket 僵尸连接检查任务（60 秒钟执行一次）
+    # 检查间隔建议设置为超时时间的 1/2，确保及时清理
+    websocket_check_interval = max(30, WEBSOCKET_TIMEOUT_SECONDS // 2)
+    scheduler.add_job(
+        check_and_cleanup_zombie_connections,
+        trigger=IntervalTrigger(seconds=websocket_check_interval, timezone=_trigger_tz),
+        id="check_and_cleanup_zombie_connections",
+        max_instances=1,
+        replace_existing=True,
+    )
+    logger.info(
+        f"WebSocket 僵尸连接检查任务已添加，检查间隔: {websocket_check_interval} 秒，"
+        f"超时时间: {WEBSOCKET_TIMEOUT_SECONDS} 秒"
+    )
     
     # 启动调度器
     scheduler.start()
