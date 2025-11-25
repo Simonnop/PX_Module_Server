@@ -435,20 +435,13 @@ def list_channel_groups(request: HttpRequest):
     """列出 channel layer 中所有的 group 及其连接
     
     返回：group 列表，包含 group 名称、连接的 channel 列表，以及关联的模块信息（如果适用）
+    支持 InMemoryChannelLayer 和 RedisChannelLayer
     """
     try:
         channel_layer = get_channel_layer()
         
         if channel_layer is None:
             return response_fail("3002", "Channel Layer 未配置")
-        
-        # 检查是否是 InMemoryChannelLayer
-        from channels.layers import InMemoryChannelLayer
-        if not isinstance(channel_layer, InMemoryChannelLayer):
-            return response_fail("3002", f"当前 Channel Layer 类型 ({type(channel_layer).__name__}) 不支持查询 group 信息")
-        
-        # 获取所有 group 信息
-        groups_info = []
         
         # 获取所有在线模块，用于关联 group 信息
         online_modules = {}
@@ -461,25 +454,77 @@ def list_channel_groups(request: HttpRequest):
                 "last_login_time": module.last_login_time.isoformat() if module.last_login_time else None,
             }
         
-        # 访问 InMemoryChannelLayer 的 groups 属性
-        # groups 是一个字典：{group_name: set of channel_names}
-        # 使用 getattr 安全访问，以防属性不存在
-        groups_dict = getattr(channel_layer, 'groups', None)
-        if groups_dict is None:
-            return response_fail("3002", "无法访问 Channel Layer 的 groups 属性")
+        groups_info = []
         
-        for group_name, channel_set in groups_dict.items():
-            # channel_set 可能是 set 或其他可迭代对象
-            try:
-                channel_list = list(channel_set) if channel_set else []
-            except (TypeError, AttributeError):
-                channel_list = []
+        # 检查 Channel Layer 类型并获取 groups
+        from channels.layers import InMemoryChannelLayer
+        
+        if isinstance(channel_layer, InMemoryChannelLayer):
+            # InMemoryChannelLayer: 直接访问 groups 属性
+            groups_dict = getattr(channel_layer, 'groups', None)
+            if groups_dict is None:
+                return response_fail("3002", "无法访问 Channel Layer 的 groups 属性")
             
-            group_info = {
-                "group_name": group_name,
-                "channel_count": len(channel_list),
-                "channels": channel_list,
-            }
+            for group_name, channel_set in groups_dict.items():
+                try:
+                    channel_list = list(channel_set) if channel_set else []
+                except (TypeError, AttributeError):
+                    channel_list = []
+                
+                group_info = {
+                    "group_name": group_name,
+                    "channel_count": len(channel_list),
+                    "channels": channel_list,
+                }
+                groups_info.append(group_info)
+        
+        else:
+            # RedisChannelLayer: 通过 Redis 查询 group 信息
+            try:
+                # 获取 RedisChannelLayer 的 connection 和 prefix
+                redis_connection = getattr(channel_layer, 'connection', None)
+                if redis_connection is None:
+                    return response_fail("3002", "无法访问 RedisChannelLayer 的 connection 属性")
+                
+                prefix = getattr(channel_layer, 'prefix', 'asgi')
+                
+                # 扫描所有 group key (格式: {prefix}:group:{group_name})
+                group_pattern = f"{prefix}:group:*"
+                groups_dict = {}
+                
+                # 使用 SCAN 命令遍历所有匹配的 key
+                cursor = 0
+                while True:
+                    cursor, keys = redis_connection.scan(cursor, match=group_pattern, count=100)
+                    for key in keys:
+                        # 从 key 中提取 group_name
+                        # key 格式: b'{prefix}:group:{group_name}' 或 '{prefix}:group:{group_name}'
+                        key_str = key.decode('utf-8') if isinstance(key, bytes) else key
+                        group_name = key_str.replace(f"{prefix}:group:", "")
+                        
+                        # 获取该 group 的所有 channel (使用 SMEMBERS)
+                        channel_set = redis_connection.smembers(key)
+                        channel_list = [ch.decode('utf-8') if isinstance(ch, bytes) else ch for ch in channel_set]
+                        groups_dict[group_name] = channel_list
+                    
+                    if cursor == 0:
+                        break
+                
+                # 构建 group 信息
+                for group_name, channel_list in groups_dict.items():
+                    group_info = {
+                        "group_name": group_name,
+                        "channel_count": len(channel_list),
+                        "channels": channel_list,
+                    }
+                    groups_info.append(group_info)
+            
+            except Exception as e:
+                return response_fail("3002", f"查询 Redis Channel Layer group 信息失败: {str(e)}")
+        
+        # 为每个 group 关联模块信息
+        for group_info in groups_info:
+            group_name = group_info["group_name"]
             
             # 如果是 module_{module_id} 格式的 group，尝试关联模块信息
             if group_name.startswith("module_"):
@@ -510,8 +555,6 @@ def list_channel_groups(request: HttpRequest):
                     group_info["module"] = None
             else:
                 group_info["module"] = None
-            
-            groups_info.append(group_info)
         
         return response_ok({
             "total_groups": len(groups_info),
