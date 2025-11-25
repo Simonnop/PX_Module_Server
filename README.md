@@ -55,7 +55,7 @@ Module_Server/
 
 - **Web 框架**：Django 5.2 + Channels 4（ASGI）
 - **数据库**：MongoDB（业务数据）+ SQLite（Django 内置应用）
-- **消息层**：Channels 内存实现（单进程部署）
+- **消息层**：Channels + Redis（`channels-redis` + RedisChannelLayer，实现跨 worker 通信）
 - **定时任务**：APScheduler（django-apscheduler）
 - **ORM**：Django ORM + django-mongodb-backend（模型见 `platform_app/models.py`）
 
@@ -87,6 +87,9 @@ MONGODB_NAME=forecast_platform
 # 邮件通知配置
 NOTIFICATION_EMAIL=*********
 EMAIL_API_URL=http://your-email-server:port/send
+
+# Channels 通道层（Redis 实现）
+REDIS_CHANNEL_LAYER_URL=redis://redis:6379/0
 ```
 
 ### 生产环境配置示例
@@ -105,6 +108,9 @@ MONGODB_NAME=forecast_platform
 NOTIFICATION_EMAIL=your-email@example.com
 EMAIL_API_URL=http://your-email-server:port/send
 
+# Channels 通道层（Redis 实现）
+REDIS_CHANNEL_LAYER_URL=redis://redis:6379/0
+
 # 静态文件目录（可选，默认使用项目根目录下的 staticfiles）
 STATIC_ROOT=/path/to/staticfiles
 
@@ -116,6 +122,28 @@ LOG_LEVEL=INFO
 - 生产环境必须设置 `SECRET_KEY` 和 `ALLOWED_HOSTS`
 - `SECRET_KEY` 生成方式：`python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"`
 - 邮件通知配置 `NOTIFICATION_EMAIL` 和 `EMAIL_API_URL` 必须设置，否则应用启动时会报错
+
+## 依赖服务
+
+### Redis Channel Layer
+
+- 项目使用 `channels-redis` 将 Channels 通道层迁移到 Redis，确保多个 Gunicorn/ASGI worker 能共享 `groups` 和 `channel_name` 信息。
+- 环境变量 `REDIS_CHANNEL_LAYER_URL` 定义 Redis 连接地址（默认 `redis://127.0.0.1:6379/0`）。
+- 可使用单个 Docker 命令启动 Redis（示例命令会创建名为 `module_server_redis` 的容器并挂载持久卷）：
+
+```bash
+docker pull redis:8.2
+docker volume create module_server_redis_data
+docker run -d \
+  --name module_server_redis \
+  -p 6379:6379 \
+  -v module_server_redis_data:/data \
+  redis:8.2 \
+  redis-server --save 900 1 --appendonly yes
+```
+
+- 如果 Redis 部署在其他主机/端口，请调整 `.env` 中的 `REDIS_CHANNEL_LAYER_URL`。
+- 启动完成后可通过 `docker ps -f name=module_server_redis` 或 `docker logs module_server_redis` 验证状态。
 
 ## 数据库初始化
 
@@ -152,12 +180,12 @@ python manage.py collectstatic --noinput
 2. **使用 Gunicorn 运行 ASGI 服务器**
 
 ```bash
-gunicorn project_base.asgi:application -k uvicorn.workers.UvicornWorker -b 0.0.0.0:10080 --workers 1
+gunicorn project_base.asgi:application -k uvicorn.workers.UvicornWorker -b 0.0.0.0:10080 --workers 2
 ```
 
 **Gunicorn 配置说明**：
 - `-k uvicorn.workers.UvicornWorker`：使用 Uvicorn worker 处理 ASGI 应用
-- `--workers 1`：由于使用内存消息层，仅支持单进程部署
+- `--workers 2`：Redis Channel Layer 支持跨 worker，请根据 CPU/负载调整数量
 - `-b 0.0.0.0:10080`：绑定地址和端口
 
 **推荐配置**：项目已包含 `gunicorn.conf.py` 配置文件，可直接使用：
@@ -167,7 +195,7 @@ gunicorn project_base.asgi:application -c gunicorn.conf.py
 ```
 
 配置文件说明：
-- `workers = 1`：单进程部署（内存消息层限制）
+- `workers = 1`：示例配置，可根据机器 CPU/负载调整，Redis Channel Layer 支持多 worker
 - `worker_class = "uvicorn.workers.UvicornWorker"`：使用 Uvicorn worker 处理 ASGI
 - 日志文件：`logs/gunicorn_access.log` 和 `logs/gunicorn_error.log`
 - 可根据实际部署环境修改 `bind`、`chdir` 等配置项
@@ -209,9 +237,9 @@ chmod +x manage.sh
 
 使用 systemd、supervisor 或 PM2 管理进程，确保服务自动重启。
 
-**注意事项**：
-- 生产环境使用内存消息层，仅支持单进程部署（`--workers 1`）
-- 如需多进程或多服务器部署，需要配置 Redis 作为消息层
+- **注意事项**：
+- 生产环境使用 Redis Channel Layer，务必保证 `REDIS_CHANNEL_LAYER_URL` 指向可达的 Redis 实例（可参考上述 `docker run` 命令）
+- Redis 是消息层的关键依赖，多个 Gunicorn worker 或多台服务器部署时必须统一连接该 Redis
 - 建议使用 Nginx 作为反向代理处理静态文件和负载均衡
 
 ## 接口说明

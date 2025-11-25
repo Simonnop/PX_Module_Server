@@ -87,10 +87,14 @@ TEMPLATES = [
 WSGI_APPLICATION = "project_base.wsgi.application"
 ASGI_APPLICATION = "project_base.asgi.application"
 
-# Channels 的消息层（使用内存实现，适用于单进程部署）
+# Channels 的消息层（使用 Redis 实现，便于跨 worker 通信）
+REDIS_CHANNEL_LAYER_URL = config("REDIS_CHANNEL_LAYER_URL", default="redis://127.0.0.1:6379/0")
 CHANNEL_LAYERS = {
     "default": {
-        "BACKEND": "channels.layers.InMemoryChannelLayer",
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [REDIS_CHANNEL_LAYER_URL],
+        },
     },
 }
 

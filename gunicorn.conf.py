@@ -5,7 +5,7 @@
 bind = "0.0.0.0:10080"
 
 # Worker 配置
-# 注意：由于使用内存消息层，仅支持单进程部署
+# 使用 Redis Channel Layer，可根据 CPU 调整 worker 数量
 workers = 1
 worker_class = "uvicorn.workers.UvicornWorker"
 worker_connections = 1000
