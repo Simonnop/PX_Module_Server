@@ -13,7 +13,6 @@ urlpatterns = [
     path("workflow/list", views.list_workflows),
     path("scheduler/jobs", views.list_scheduled_jobs),
     path("scheduler/reload", views.reload_scheduler_jobs),
-    path("channel/groups", views.list_channel_groups),
 ]
 
 
