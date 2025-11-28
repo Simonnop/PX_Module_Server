@@ -98,6 +98,13 @@ CHANNEL_LAYERS = {
     },
 }
 
+# # 使用 InMemoryChannelLayer 进行测试
+# CHANNEL_LAYERS = {
+#     "default": {
+#         "BACKEND": "channels.layers.InMemoryChannelLayer",
+#     },
+# }
+
 # Django 数据库配置（等价于 Spring 的 DataSource 配置）
 # 将默认库切到 SQLite（供 Django 内置应用使用），
 # 另起一个名为 "mongo" 的库供业务模型（platform_app）使用

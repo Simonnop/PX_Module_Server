@@ -24,11 +24,13 @@ WEBSOCKET_PING_INTERVAL_SECONDS = config("WEBSOCKET_PING_INTERVAL_SECONDS", defa
 # 跟踪模块执行等待状态：{execution_id: {'module_id': int, 'workflow_id': str, 'sent_time': datetime}}
 global _execution_waiting 
 _execution_waiting = {}
+global _channel_layer
+_channel_layer = get_channel_layer()
 
 def send_message_to_client(module_id, message):
     """同步方式发送消息到客户端"""
-    channel_layer = get_channel_layer()
-    async_to_sync(channel_layer.group_send)(
+    
+    async_to_sync(_channel_layer.group_send)(
         f"module_{module_id}",
         {
             "type": "send_message", # 反射? 对应触发 consumers.py 中的 send_message 方法
@@ -46,12 +48,11 @@ def close_module_websocket(module_id):
         bool: 是否成功发送关闭连接消息
     """
     try:
-        channel_layer = get_channel_layer()
-        if channel_layer is None:
+        if _channel_layer is None:
             logger.error("Channel Layer 未配置，无法关闭 WebSocket 连接")
             return False
         
-        async_to_sync(channel_layer.group_send)(
+        async_to_sync(_channel_layer.group_send)(
             f"module_{module_id}",
             {
                 "type": "close_connection"  # 触发 close_connection 方法

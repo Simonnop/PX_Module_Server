@@ -4,10 +4,9 @@ from django.views.decorators.http import require_GET, require_POST
 from django.views.decorators.csrf import csrf_exempt
 from django.db import transaction
 from .models import WorkModule, DataRequirement, WorkFlow
-from channels.layers import get_channel_layer
-from asgiref.sync import async_to_sync
 from .scheduler import execute_workflow, scheduler, reload_workflow_jobs
-from .consumers import close_module_websocket
+from .consumers import close_module_websocket, send_message_to_client
+from .consumers import _channel_layer
 
 # 说明（类比 Spring MVC）：
 # - 这些函数可类比为 `@RestController` 下的 `@GetMapping`。
@@ -127,12 +126,9 @@ def send_message(request: HttpRequest):
     except WorkModule.DoesNotExist:
         return response_fail("3003", f"模块 (id: {module_id}) 不存在")
 
-    channel_layer = get_channel_layer()
-
-    if channel_layer is None:
+    if _channel_layer is None:
         return response_fail("3002", "Channel Layer is not configured. Please check your settings.")
 
-    from .consumers import send_message_to_client
     send_message_to_client(module_id, message)
 
     return response_ok({"message": message, "module_id": module_id, "module_name": module.name})

@@ -12,9 +12,8 @@ from django.db import models
 from django_apscheduler.jobstores import DjangoJobStore
 from django_apscheduler.models import DjangoJobExecution
 from platform_app.models import WorkModule, WorkFlow
-from platform_app.consumers import send_message_to_client, _execution_waiting
+from platform_app.consumers import send_message_to_client, _execution_waiting, _channel_layer
 from decouple import config
-from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 
 from .utils import parse_time_tz, parse_time_shift, to_naive_local, local_now
@@ -391,19 +390,18 @@ def _cleanup_channel_group(module_id):
         module_id: 模块ID
     """
     try:
-        channel_layer = get_channel_layer()
-        if channel_layer is None:
+        if _channel_layer is None:
             return False
         
         group_name = f"module_{module_id}"
         
-        # 尝试清理 group（如果 channel_layer 支持）
+        # 尝试清理 group（如果 _channel_layer 支持）
         # 对于 InMemoryChannelLayer，可以尝试直接访问并清理
         try:
             from channels.layers import InMemoryChannelLayer
-            if isinstance(channel_layer, InMemoryChannelLayer):
+            if isinstance(_channel_layer, InMemoryChannelLayer):
                 # 直接访问 groups 并清理
-                groups = getattr(channel_layer, 'groups', None)
+                groups = getattr(_channel_layer, 'groups', None)
                 if groups and group_name in groups:
                     # 清空 group 中的所有 channel
                     groups[group_name].clear()
