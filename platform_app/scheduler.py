@@ -248,49 +248,22 @@ def add_workflow_job(workflow):
             logger.warning(f"工作流 {workflow.name} 无法计算下一次执行时间")
             return
             
-        # 调度内部使用带时区时间，用于 CronTrigger
-        aware_next = parse_time_tz(next_execution_time)
-
         # 使用 workflow_id 作为 job_id，如果不存在则使用 id
         job_id = f"workflow_{workflow.workflow_id if workflow.workflow_id else workflow.id}"
-        
-        # 构建多个 cron 表达式的触发器
-        triggers = []
-        for cron_expr in workflow.execute_cron_list:
-            try:
-                parts = cron_expr.split()
-                if len(parts) != 5:
-                    logger.error(f"无效的 crontab 表达式: {cron_expr}")
-                    continue
-                
-                minute, hour, day, month, day_of_week = parts
-                trigger = CronTrigger(
-                    minute=minute,
-                    hour=hour,
-                    day=day,
-                    month=month,
-                    day_of_week=day_of_week,
-                    timezone=_trigger_tz
-                )
-                triggers.append(trigger)
-            except Exception as e:
-                logger.error(f"解析 crontab 表达式失败: {cron_expr}, 错误: {str(e)}")
-                continue
-        
-        if not triggers:
-            logger.error(f"工作流 {workflow.name} 没有有效的 cron 表达式")
-            return
-        
-        # 如果有多个触发器，使用 OrTrigger
-        if len(triggers) == 1:
-            final_trigger = triggers[0]
-        else:
-            final_trigger = OrTrigger(triggers)
+
+        trigger = CronTrigger(
+            minute=next_execution_time.minute,
+            hour=next_execution_time.hour,
+            day=next_execution_time.day,
+            month=next_execution_time.month,
+            second=next_execution_time.second,
+            timezone=_trigger_tz
+        )
         
         # 添加任务
         scheduler.add_job(
             execute_workflow,
-            final_trigger,
+            trigger,
             id=job_id,
             args=[str(workflow.workflow_id)],
             misfire_grace_time=None,  # 错过的任务不再执行
