@@ -257,6 +257,7 @@ def add_workflow_job(workflow):
             day=next_execution_time.day,
             month=next_execution_time.month,
             second=next_execution_time.second,
+            day_of_week=next_execution_time.weekday(),
             timezone=_trigger_tz
         )
         
