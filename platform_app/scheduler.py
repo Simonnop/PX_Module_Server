@@ -89,10 +89,11 @@ def get_next_execution_time(cron_list, shift_time, shift_unit):
     return next_execution_time
 
 def execute_workflow(workflow_id):
+
+    workflow = WorkFlow.objects.get(workflow_id=workflow_id)
     """执行工作流的预测任务"""
     try:
         # 获取工作流
-        workflow = WorkFlow.objects.get(workflow_id=workflow_id)
         now = timezone.now()
         
         # 获取工作流中需要执行的模块列表
@@ -235,6 +236,11 @@ def execute_workflow(workflow_id):
         logger.error(f"工作流 {workflow_id} 不存在")
     except Exception as e:
         logger.error(f"工作流 {workflow_id} 执行失败: {str(e)}")
+    finally:
+        # 移除当前工作流的调度任务
+        remove_workflow_job(workflow)
+        # 重新添加工作流的调度任务
+        add_workflow_job(workflow)
 
 def add_workflow_job(workflow):
     """为工作流添加调度任务"""
