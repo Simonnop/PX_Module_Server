@@ -106,14 +106,21 @@ CHANNEL_LAYERS = {
 # }
 
 # Django 数据库配置（等价于 Spring 的 DataSource 配置）
-# 将默认库切到 SQLite（供 Django 内置应用使用），
-# 另起一个名为 "mongo" 的库供业务模型（platform_app）使用
+# 默认库改为 MySQL，供 Django 内置应用与 APScheduler 使用；
+# 业务模型（platform_app）仍然走独立的 "mongo" 数据库。
 DATABASES = {
     "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": str(BASE_DIR / "db.sqlite3"),
-        'OPTIONS': {
-            'timeout': 15,
+        "ENGINE": "django.db.backends.mysql",  # 使用 MySQL 作为默认数据库
+        "NAME": config("MYSQL_DB", default="module_server"),  # 数据库名
+        "USER": config("MYSQL_USER", default="root"),  # 用户名
+        "PASSWORD": config("MYSQL_PASSWORD", default=""),  # 密码
+        "HOST": config("MYSQL_HOST", default="127.0.0.1"),  # 主机
+        "PORT": config("MYSQL_PORT", default="3306"),  # 端口
+        "OPTIONS": {
+            # 使用 utf8mb4 防止表情等字符保存失败
+            "charset": "utf8mb4",
+            # 严格模式，避免静默截断
+            "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
         },
     },
     "mongo": {
