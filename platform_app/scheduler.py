@@ -12,7 +12,7 @@ from django.db import models
 from django_apscheduler.jobstores import DjangoJobStore
 from django_apscheduler.models import DjangoJobExecution
 from platform_app.models import WorkModule, WorkFlow
-from platform_app.consumers import send_message_to_client, _execution_waiting, _channel_layer
+from platform_app.consumers import send_message_to_client, _execution_waiting, _active_consumers
 from decouple import config
 from asgiref.sync import async_to_sync
 
@@ -360,42 +360,20 @@ def check_execution_timeout():
         logger.error(f"检查执行超时失败: {str(e)}", exc_info=True)
 
 
-def _cleanup_channel_group(module_id):
-    """清理指定模块的 channel group
-    
-    注意：由于不知道具体的 channel_name，这里尝试清理整个 group。
-    对于 InMemoryChannelLayer，可以尝试直接清理；对于其他类型，group 会在没有活跃连接时自动清理。
+def _cleanup_consumer_instance(module_id):
+    """清理指定模块的 consumer 实例（如果存在）
     
     Args:
         module_id: 模块ID
     """
     try:
-        if _channel_layer is None:
-            return False
-        
-        group_name = f"module_{module_id}"
-        
-        # 尝试清理 group（如果 _channel_layer 支持）
-        # 对于 InMemoryChannelLayer，可以尝试直接访问并清理
-        try:
-            from channels.layers import InMemoryChannelLayer
-            if isinstance(_channel_layer, InMemoryChannelLayer):
-                # 直接访问 groups 并清理
-                groups = getattr(_channel_layer, 'groups', None)
-                if groups and group_name in groups:
-                    # 清空 group 中的所有 channel
-                    groups[group_name].clear()
-                    logger.debug(f"已清理 channel group: {group_name}")
-                    return True
-        except Exception as e:
-            logger.debug(f"清理 channel group {group_name} 失败（可能不支持直接操作）: {str(e)}")
-        
-        # 对于其他类型的 channel_layer，group 会在没有活跃连接时自动清理
-        # 或者可以通过发送一个清理消息（但僵尸连接已断开，不会收到）
+        if module_id in _active_consumers:
+            del _active_consumers[module_id]
+            logger.debug(f"已清理模块 {module_id} 的 consumer 实例")
+            return True
         return False
-        
     except Exception as e:
-        logger.warning(f"清理 channel group 时发生异常: {str(e)}")
+        logger.warning(f"清理 consumer 实例时发生异常: {str(e)}")
         return False
 
 
@@ -441,12 +419,11 @@ def check_and_cleanup_zombie_connections():
                         f"会话ID: {old_session_id}"
                     )
                     
-                    # 清理 channel group
-                    _cleanup_channel_group(module.module_id)
+                    # 清理 consumer 实例（如果存在）
+                    _cleanup_consumer_instance(module.module_id)
                     
                     # 更新数据库状态
-                    # 注意：不调用 close_module_websocket，因为僵尸连接已经断开，
-                    # 通过 group_send 发送消息无法关闭已断开的连接
+                    # 注意：不调用 close_module_websocket，因为僵尸连接已经断开
                     module.session_id = None
                     module.alive = False
                     module.save()
@@ -455,7 +432,7 @@ def check_and_cleanup_zombie_connections():
                     
                     logger.info(
                         f"已清理僵尸连接: 模块 {module.name}(id: {module.module_id}), "
-                        f"已更新数据库状态为离线并清理 channel group"
+                        f"已更新数据库状态为离线并清理 consumer 实例"
                     )
                     
                 except Exception as e:

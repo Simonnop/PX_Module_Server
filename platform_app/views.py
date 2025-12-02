@@ -6,7 +6,6 @@ from django.db import transaction
 from .models import WorkModule, DataRequirement, WorkFlow
 from .scheduler import execute_workflow, scheduler, reload_workflow_jobs
 from .consumers import close_module_websocket, send_message_to_client
-from .consumers import _channel_layer
 
 # 说明（类比 Spring MVC）：
 # - 这些函数可类比为 `@RestController` 下的 `@GetMapping`。
@@ -125,9 +124,6 @@ def send_message(request: HttpRequest):
         module = WorkModule.objects.get(module_id=module_id)
     except WorkModule.DoesNotExist:
         return response_fail("3003", f"模块 (id: {module_id}) 不存在")
-
-    if _channel_layer is None:
-        return response_fail("3002", "Channel Layer is not configured. Please check your settings.")
 
     send_message_to_client(module_id, message)
 

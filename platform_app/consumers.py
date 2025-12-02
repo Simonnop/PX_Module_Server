@@ -7,7 +7,6 @@ from .email import send_module_execution_failure_notification
 from channels.generic.websocket import AsyncWebsocketConsumer
 from asgiref.sync import sync_to_async
 from .models import WorkModule, WorkFlow
-from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 from decouple import config
 
@@ -24,22 +23,21 @@ WEBSOCKET_PING_INTERVAL_SECONDS = config("WEBSOCKET_PING_INTERVAL_SECONDS", defa
 # 跟踪模块执行等待状态：{execution_id: {'module_id': int, 'workflow_id': str, 'sent_time': datetime}}
 global _execution_waiting 
 _execution_waiting = {}
-global _channel_layer
-_channel_layer = get_channel_layer()
+# 跟踪活跃的 consumer 实例：{module_id: ModuleConsumer}
+global _active_consumers
+_active_consumers = {}
 
 def send_message_to_client(module_id, message):
-    """同步方式发送消息到客户端"""
-    
-    async_to_sync(_channel_layer.group_send)(
-        f"module_{module_id}",
-        {
-            "type": "send_message", # 反射? 对应触发 consumers.py 中的 send_message 方法
-            "message": message
-        }
-    )
+    """同步方式发送消息到客户端，直接调用 consumer 实例的方法"""
+    if module_id in _active_consumers:
+        consumer = _active_consumers[module_id]
+        # 直接调用 consumer 的 send_message 方法
+        async_to_sync(consumer.send_message)(message=message)
+    else:
+        logger.warning(f"模块 {module_id} 没有活跃的 consumer 实例，无法发送消息")
 
 def close_module_websocket(module_id):
-    """服务端关闭指定模块的 WebSocket 连接
+    """服务端关闭指定模块的 WebSocket 连接，直接调用 consumer 实例的方法
     
     Args:
         module_id: 模块ID
@@ -48,27 +46,22 @@ def close_module_websocket(module_id):
         bool: 是否成功发送关闭连接消息
     """
     try:
-        if _channel_layer is None:
-            logger.error("Channel Layer 未配置，无法关闭 WebSocket 连接")
+        if module_id in _active_consumers:
+            consumer = _active_consumers[module_id]
+            # 直接调用 consumer 的 close_connection 方法
+            async_to_sync(consumer.close_connection)()
+            # 获取模块信息用于日志
+            try:
+                module = WorkModule.objects.get(module_id=module_id)
+                logger.info(f"已发送关闭 WebSocket 连接消息到模块 {module.name}(id: {module_id})")
+            except WorkModule.DoesNotExist:
+                logger.info(f"已发送关闭 WebSocket 连接消息到模块 (id: {module_id})")
+            return True
+        else:
+            logger.warning(f"模块 {module_id} 没有活跃的 consumer 实例，无法关闭连接")
             return False
-        
-        async_to_sync(_channel_layer.group_send)(
-            f"module_{module_id}",
-            {
-                "type": "close_connection"  # 触发 close_connection 方法
-            }
-        )
-        # 获取模块信息用于日志
-        from .models import WorkModule
-        try:
-            module = WorkModule.objects.get(module_id=module_id)
-            logger.info(f"已发送关闭 WebSocket 连接消息到模块 {module.name}(id: {module_id})")
-        except WorkModule.DoesNotExist:
-            logger.info(f"已发送关闭 WebSocket 连接消息到模块 (id: {module_id})")
-        return True
     except Exception as e:
         # 获取模块信息用于日志
-        from .models import WorkModule
         try:
             module = WorkModule.objects.get(module_id=module_id)
             logger.error(f"关闭模块 {module.name}(id: {module_id}) 的 WebSocket 连接失败: {str(e)}", exc_info=True)
@@ -117,18 +110,9 @@ class ModuleConsumer(AsyncWebsocketConsumer):
         await self.accept()
         
         logger.info(f"模块 {module.name}(id: {module.module_id}) 连接成功")
-        # 尝试删除原有的 channel_name
-        try:
-            await self.channel_layer.group_discard(
-                f"module_{module.module_id}",
-                self.channel_name
-            )
-        except Exception as e:
-            logger.warning(f"删除原有的 channel_name 失败: {str(e)}")
-        await self.channel_layer.group_add(
-                f"module_{module.module_id}",
-                self.channel_name
-            )
+        
+        # 注册 consumer 实例到全局字典
+        _active_consumers[module.module_id] = self
         
         # 启动 ping 任务
         self._start_ping_task()
@@ -151,10 +135,10 @@ class ModuleConsumer(AsyncWebsocketConsumer):
             alive=module.alive
         )
         logger.info(f"模块 {module.name}(id: {module.module_id}) 断开连接")
-        await self.channel_layer.group_discard(
-                f"module_{module.module_id}",
-                self.channel_name
-            )
+        
+        # 从全局字典中注销 consumer 实例
+        if module.module_id in _active_consumers:
+            del _active_consumers[module.module_id]
 
     async def receive(self, text_data=None, bytes_data=None):
         """接收消息：处理JSON请求或WebSocket ping/pong"""
@@ -191,19 +175,23 @@ class ModuleConsumer(AsyncWebsocketConsumer):
                 'message': f'处理请求时发生异常: {str(e)}'
             }))
 
-    async def send_message(self, event):
-        message = event['message']
+    async def send_message(self, message=None):
+        """发送消息到客户端
+        
+        Args:
+            message: 消息内容
+        """
+        if message is None:
+            logger.warning("send_message 调用时未提供消息内容")
+            return
+        
         logger.info(f"向客户端发送消息: {message}")
         await self.send(text_data=json.dumps({
             'message': message
         }))
     
-    async def close_connection(self, event=None):
-        """服务端主动关闭 WebSocket 连接
-        
-        Args:
-            event: Channels 事件对象（可选）
-        """
+    async def close_connection(self):
+        """服务端主动关闭 WebSocket 连接"""
         # 停止 ping 任务
         self._stop_ping_task()
         
@@ -221,14 +209,12 @@ class ModuleConsumer(AsyncWebsocketConsumer):
             except WorkModule.DoesNotExist:
                 logger.warning("无法找到模块信息，直接关闭连接")
             
-            # 从 group 中移除
+            # 从全局字典中注销 consumer 实例
             if hasattr(self, 'session_id'):
                 try:
                     module = await self._get_module_by_session(self.session_id)
-                    await self.channel_layer.group_discard(
-                        f"module_{module.module_id}",
-                        self.channel_name
-                    )
+                    if module.module_id in _active_consumers:
+                        del _active_consumers[module.module_id]
                 except WorkModule.DoesNotExist:
                     pass
             
