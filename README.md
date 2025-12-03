@@ -36,26 +36,22 @@ Module_Server/
 ├── test_server.sh                    # 测试服务器启动脚本
 ├── requirements.txt                  # Python 依赖包列表
 ├── gunicorn.conf.py                  # Gunicorn 生产环境配置
-├── db.sqlite3                        # SQLite 数据库文件（Django 内置应用）
 └── README.md                         # 项目说明文档
 ```
 
 ## 功能特点
 
-- **模块注册**：通过接口注册模块信息，生成 `module_hash` 和 `module_id`
-- **在线管理**：WebSocket 连接绑定会话并维护心跳时间
-- **列表查询**：查询当前在线模块列表
+- **组件管理**：WebSocket 连接绑定会话并维护心跳时间，支持组件热切换
 - **工作流调度**：创建工作流，配置定时执行任务（支持多个 crontab 表达式）
 - **消息通信**：通过 WebSocket 向模块发送执行命令，接收模块执行结果
 - **邮件通知**：模块执行失败时自动发送邮件通知
 - **定时任务管理**：查看和管理调度器中的定时任务
-- **一致的响应结构**：`{"code","message","result"}`
 
 ## 技术栈
 
 - **Web 框架**：Django 5.2 + Channels 4（ASGI）
-- **数据库**：MongoDB（业务数据）+ SQLite（Django 内置应用）
-- **消息层**：Channels + Redis（`channels-redis` + RedisChannelLayer，实现跨 worker 通信）
+- **数据库**：MySQL（Django 内置应用和 APScheduler）+ MongoDB（业务数据）
+- **消息层**：基于 Channels 的 WebSocket 负责与组件进行通信
 - **定时任务**：APScheduler（django-apscheduler）
 - **ORM**：Django ORM + django-mongodb-backend（模型见 `platform_app/models.py`）
 
@@ -80,16 +76,20 @@ ALLOWED_HOSTS=*
 # 服务器端口（仅用于开发环境的 runserver）
 SERVER_PORT=10080
 
-# MongoDB 配置
+# MySQL 配置（Django 内置应用和 APScheduler）
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=your_password
+MYSQL_DB=module_server
+
+# MongoDB 配置（业务数据）
 MONGODB_HOST=mongodb://localhost:27017
 MONGODB_NAME=forecast_platform
 
 # 邮件通知配置
 NOTIFICATION_EMAIL=*********
 EMAIL_API_URL=http://your-email-server:port/send
-
-# Channels 通道层（Redis 实现）
-REDIS_CHANNEL_LAYER_URL=redis://redis:6379/0
 ```
 
 ### 生产环境配置示例
@@ -100,16 +100,20 @@ DEBUG=False
 SECRET_KEY=your-strong-secret-key-here
 ALLOWED_HOSTS=example.com,www.example.com,api.example.com
 
-# MongoDB 配置
+# MySQL 配置（Django 内置应用和 APScheduler）
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=your_strong_password
+MYSQL_DB=module_server
+
+# MongoDB 配置（业务数据）
 MONGODB_HOST=mongodb://localhost:27017
 MONGODB_NAME=forecast_platform
 
 # 邮件通知配置
 NOTIFICATION_EMAIL=your-email@example.com
 EMAIL_API_URL=http://your-email-server:port/send
-
-# Channels 通道层（Redis 实现）
-REDIS_CHANNEL_LAYER_URL=redis://redis:6379/0
 
 # 静态文件目录（可选，默认使用项目根目录下的 staticfiles）
 STATIC_ROOT=/path/to/staticfiles
@@ -122,43 +126,80 @@ LOG_LEVEL=INFO
 - 生产环境必须设置 `SECRET_KEY` 和 `ALLOWED_HOSTS`
 - `SECRET_KEY` 生成方式：`python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"`
 - 邮件通知配置 `NOTIFICATION_EMAIL` 和 `EMAIL_API_URL` 必须设置，否则应用启动时会报错
+- MySQL 和 MongoDB 服务必须提前启动并配置正确
 
 ## 依赖服务
 
-### Redis Channel Layer
+### MySQL 数据库
 
-- 项目使用 `channels-redis` 将 Channels 通道层迁移到 Redis，确保多个 Gunicorn/ASGI worker 能共享 `groups` 和 `channel_name` 信息。
-- 环境变量 `REDIS_CHANNEL_LAYER_URL` 定义 Redis 连接地址（默认 `redis://127.0.0.1:6379/0`）。
-- 可使用单个 Docker 命令启动 Redis（示例命令会创建名为 `module_server_redis` 的容器并挂载持久卷）：
+- 项目使用 MySQL 作为默认数据库，用于 Django 内置应用（如 admin、sessions）和 APScheduler 定时任务存储。
+- 使用 Docker 启动 MySQL 示例：
 
 ```bash
-docker pull redis:8.2
-docker volume create module_server_redis_data
+docker pull mysql:8.0
 docker run -d \
-  --name module_server_redis \
-  -p 6379:6379 \
-  -v module_server_redis_data:/data \
-  redis:8.2 \
-  redis-server --save 900 1 --appendonly yes
+  --name mysql8 \
+  -e MYSQL_ROOT_PASSWORD=your_password \
+  -e MYSQL_DATABASE=module_server \
+  -p 3306:3306 \
+  -v mysql_data:/var/lib/mysql \
+  mysql:8.0
 ```
 
-- 如果 Redis 部署在其他主机/端口，请调整 `.env` 中的 `REDIS_CHANNEL_LAYER_URL`。
-- 启动完成后可通过 `docker ps -f name=module_server_redis` 或 `docker logs module_server_redis` 验证状态。
+- 如果使用本地 MySQL 服务，需要提前创建数据库（默认数据库名：`module_server`）：
+
+```sql
+CREATE DATABASE module_server CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+```
+
+### MongoDB 数据库
+
+- 项目使用 MongoDB 存储业务数据（模块、工作流等）。
+- 需要提前启动 MongoDB 服务。
+- 使用 Docker 启动 MongoDB 示例：
+
+```bash
+docker pull mongo:latest
+docker run -d \
+  --name module_server_mongo \
+  -p 27017:27017 \
+  -v mongo_data:/data/db \
+  mongo:latest
+```
+
+### Channels 消息层
+
+- 项目使用 `InMemoryChannelLayer` 作为 Channels 消息层。
+- 当前实现通过直接调用 consumer 实例方法进行通信，不依赖 channel_layer 的跨进程功能。
+- **注意**：当前配置仅支持单进程部署，如需多进程或多服务器部署，需要配置 Redis Channel Layer。
 
 ## 数据库初始化
 
-1) 启动 MongoDB（确保 MongoDB 服务正在运行）
+1. **启动 MySQL 和 MongoDB 服务**
 
-2) 配置 MongoDB 连接（在 `.env` 文件中设置 `MONGODB_HOST` 和 `MONGODB_NAME`）
+   - 确保 MySQL 服务正在运行
+   - 确保 MongoDB 服务正在运行
 
-3) 生成并应用迁移
+2. **创建 MySQL 数据库**
 
-```bash
-python manage.py makemigrations
-python manage.py migrate
-```
+   ```sql
+   CREATE DATABASE module_server CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+   ```
 
-注意：SQLite 数据库（`db.sqlite3`）会自动创建，用于 Django 内置应用。
+3. **配置数据库连接**
+
+   在 `.env` 文件中设置：
+   - MySQL 配置：`MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_USER`、`MYSQL_PASSWORD`、`MYSQL_DB`
+   - MongoDB 配置：`MONGODB_HOST`、`MONGODB_NAME`
+
+4. **生成并应用迁移**
+
+   ```bash
+   python manage.py makemigrations
+   python manage.py migrate
+   ```
+
+   注意：迁移会同时应用到 MySQL（Django 内置应用）和 MongoDB（业务应用）。
 
 ## 运行服务器
 
@@ -185,7 +226,7 @@ gunicorn project_base.asgi:application -k uvicorn.workers.UvicornWorker -b 0.0.0
 
 **Gunicorn 配置说明**：
 - `-k uvicorn.workers.UvicornWorker`：使用 Uvicorn worker 处理 ASGI 应用
-- `--workers 2`：Redis Channel Layer 支持跨 worker，请根据 CPU/负载调整数量
+- `--workers 1`：当前使用 InMemoryChannelLayer，仅支持单 worker 部署
 - `-b 0.0.0.0:10080`：绑定地址和端口
 
 **推荐配置**：项目已包含 `gunicorn.conf.py` 配置文件，可直接使用：
@@ -195,7 +236,7 @@ gunicorn project_base.asgi:application -c gunicorn.conf.py
 ```
 
 配置文件说明：
-- `workers = 1`：示例配置，可根据机器 CPU/负载调整，Redis Channel Layer 支持多 worker
+- `workers = 1`：当前配置仅支持单 worker（InMemoryChannelLayer 限制）
 - `worker_class = "uvicorn.workers.UvicornWorker"`：使用 Uvicorn worker 处理 ASGI
 - 日志文件：`logs/gunicorn_access.log` 和 `logs/gunicorn_error.log`
 - 可根据实际部署环境修改 `bind`、`chdir` 等配置项
@@ -238,9 +279,10 @@ chmod +x manage.sh
 使用 systemd、supervisor 或 PM2 管理进程，确保服务自动重启。
 
 - **注意事项**：
-- 生产环境使用 Redis Channel Layer，务必保证 `REDIS_CHANNEL_LAYER_URL` 指向可达的 Redis 实例（可参考上述 `docker run` 命令）
-- Redis 是消息层的关键依赖，多个 Gunicorn worker 或多台服务器部署时必须统一连接该 Redis
+- 当前使用 InMemoryChannelLayer，仅支持单进程部署
+- 如需多进程或多服务器部署，需要配置 Redis Channel Layer
 - 建议使用 Nginx 作为反向代理处理静态文件和负载均衡
+- 确保 MySQL 和 MongoDB 服务正常运行
 
 ## 接口说明
 
@@ -381,8 +423,9 @@ python manage.py test_list_scheduled_jobs
    - 监控服务器资源使用情况
 
 3. **消息层限制**
-   - 当前使用内存消息层，仅支持单进程部署
-   - 如需多进程或多服务器部署，需要配置 Redis 作为消息层
+   - 当前使用 InMemoryChannelLayer，仅支持单进程部署
+   - 代码通过直接调用 consumer 实例方法进行通信，不依赖 channel_layer 的跨进程功能
+   - 如需多进程或多服务器部署，需要配置 Redis Channel Layer
 
 4. **调度器管理**
    - 调度器在应用启动时自动初始化，加载所有启用状态的工作流

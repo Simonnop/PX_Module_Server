@@ -12,5 +12,4 @@ pandas==2.3.2
 pytz==2025.2
 python-decouple==3.8
 requests==2.31.0
-channels-redis==4.1.0
 mysqlclient==2.2.7

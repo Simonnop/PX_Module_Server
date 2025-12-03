@@ -87,23 +87,14 @@ TEMPLATES = [
 WSGI_APPLICATION = "project_base.wsgi.application"
 ASGI_APPLICATION = "project_base.asgi.application"
 
-# Channels 的消息层（使用 Redis 实现，便于跨 worker 通信）
-REDIS_CHANNEL_LAYER_URL = config("REDIS_CHANNEL_LAYER_URL", default="redis://127.0.0.1:6379/0")
+# Channels 的消息层配置已移除
+# 注意：由于代码已改为直接调用 consumer 实例方法，不再使用 channel_layer 的任何功能
+# 保留最小配置：
 CHANNEL_LAYERS = {
     "default": {
-        "BACKEND": "channels_redis.core.RedisChannelLayer",
-        "CONFIG": {
-            "hosts": [REDIS_CHANNEL_LAYER_URL],
-        },
+        "BACKEND": "channels.layers.InMemoryChannelLayer",
     },
 }
-
-# # 使用 InMemoryChannelLayer 进行测试
-# CHANNEL_LAYERS = {
-#     "default": {
-#         "BACKEND": "channels.layers.InMemoryChannelLayer",
-#     },
-# }
 
 # Django 数据库配置（等价于 Spring 的 DataSource 配置）
 # 默认库改为 MySQL，供 Django 内置应用与 APScheduler 使用；
